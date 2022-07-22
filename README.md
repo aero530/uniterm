@@ -1,6 +1,12 @@
-# Terminal
+# UniTerm - Serial port terminal
 
-Serial port terminal.
+![logo](src-tauri/icons/128x128.png) 
+
+![ansi_color](images/ansi_v0.1.0.png)
+
+## Install
+
+Download the latest install or stand alone version from [releases](https://github.com/aero530/uniterm/releases).
 
 ## Roadmap
 
