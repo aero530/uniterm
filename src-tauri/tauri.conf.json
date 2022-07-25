@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "UniTerm",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "tauri": {
     "allowlist": {
@@ -32,7 +32,7 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "identifier": "com.zatetic.dev",
+      "identifier": "com.aero530.dev",
       "longDescription": "",
       "macOS": {
         "entitlements": null,

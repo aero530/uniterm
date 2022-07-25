@@ -54,6 +54,14 @@ Download the latest install or stand alone version from [releases](https://githu
     > cargo tauri build
     ```
 
+### Update Tauri-cli
+
+Occationally messages will pop up when running the dev compiler that say there is a new version of Tauri-cli.  This command line snip will update the Tauri-cli toolchain.
+
+```bash
+> cargo install tauri-cli
+```
+
 ### Generating icon files
 
 Tauri will convert an svg image to all the icon files needed and put them in the correct folder for you.

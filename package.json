@@ -1,7 +1,7 @@
 {
   "name": "uniterm",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,7 +23,8 @@
     "windicss": "^3.5.5"
   },
   "dependencies": {
-    "@tauri-apps/api": "^1.0.1",
+    "@tauri-apps/api": "^1.0.2",
+    "@tauri-apps/cli": "^1.0.5",
     "ansi-to-html": "^0.7.2",
     "d3": "^7.5.0",
     "firacode": "^6.2.0",
