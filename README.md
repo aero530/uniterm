@@ -28,7 +28,8 @@
 
 ## Install
 
-Download the latest install or stand alone version from [releases](https://github.com/aero530/uniterm/releases).
+Download the latest install or stand alone version from [releases](https://github.com/aero530/uniterm/releases).  Note that the installer seems to hang for a while before it brings up the User Account Control popup in Windows.  This is normal.  If you wait it should work fine...just takes some time.
+
 
 ## Roadmap
 
