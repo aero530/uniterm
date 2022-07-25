@@ -2,7 +2,29 @@
 
 ![logo](src-tauri/icons/128x128.png) 
 
-![ansi_color](images/ansi_v0.1.0.png)
+## Features
+
+* Split view - see multiple terminals at once
+* Display received data as
+    * ASCII text
+    * ANSI colored text
+    * Decimal values
+    * Hex values
+* Send data as
+    * ASCII text
+    * Decimals values
+    * Hex values
+* Send real time Ascii text data by clicking in the terminal display before typing
+* Log received data to file
+* Manage multiple port connections
+
+## Screenshots
+
+![ansi](images/ansi.png)
+
+![split_screen](images/split2.png)
+
+![realtime](images/realtime.png)
 
 ## Install
 
@@ -10,6 +32,7 @@ Download the latest install or stand alone version from [releases](https://githu
 
 ## Roadmap
 
+* History of text/bytes sent - Keep history of last 10 or so list of bytes sent from the bottom text input box and have a drop down menu to allow a user to select from the previous list.
 * Improve ANSI support - Currently only properly supports forground / background color escapes.  Could use something like https://crates.io/crates/vte or https://crates.io/crates/vtparse 
 
 ## Development

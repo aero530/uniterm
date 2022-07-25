@@ -45,6 +45,6 @@
 	});
 </script>
 
-<div class="tabs h-full grid grid-rows-12 overflow-y-scroll">
+<div class="tabs h-full grid grid-rows-[2rem,minmax(0,1fr)] overflow-y-scroll">
 	<slot></slot>
 </div>

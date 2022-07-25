@@ -6,13 +6,10 @@
 	export let port: Connection;
 </script>
 
-
-<!-- <div class="row-span-11 px-2 py-2 grid grid-rows-12"> -->
-<div class="row-span-11 px-2 py-2 flex flex-col">
+<div class="px-2 py-2 grid grid-rows-[minmax(0,1fr),minmax(8rem,12rem)]">
 	<PortView bind:port={port}/>
 	<PortMenu bind:port={port}/>
 </div>
 
 <style>
 </style>
-

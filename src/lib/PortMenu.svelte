@@ -146,8 +146,7 @@
 	
 </script>
 
-<div class="basis-32 flex flex-col gap-1 text-sm">
-	<!-- <div class="row-span-2 flex flex-col gap-1 text-sm min-h-8rem"> -->
+<div class="flex flex-col gap-1 text-sm">
 	<div class="flex flex-row place-content-between">
 		<div>
 			<select
@@ -169,8 +168,6 @@
 				{/each}
 			</select>
 
-			
-			
 			<select
 				bind:value={port.flow_control}
 				disabled={port.is_active}
@@ -217,7 +214,7 @@
 
 		</div>
 
-		<div class="flex items-start gap-1">
+		<div class="flex flex-wrap items-start justify-end gap-1">
 			<button on:click={() => openLink()} disabled={port.is_active}>
 				Connect
 			</button>

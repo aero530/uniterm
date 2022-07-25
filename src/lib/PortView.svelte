@@ -56,7 +56,7 @@ whitespace-pre : Formats white space as it is in the string (spaces and line bre
 	on:keydown|preventDefault={handleKeydown}
 	on:focus={() => changeFocus(true)}
 	on:blur={() => changeFocus(false)}
-	class="flex flex-wrap basis-full items-start min-h-8rem border text-white overflow-scroll mb-2"
+	class="flex flex-wrap items-start min-h-8rem border text-white overflow-scroll mb-2"
 	class:bg-black="{!is_focused}"
 	class:bg-gray-800="{is_focused}"
 	class:border-4="{is_focused}"
