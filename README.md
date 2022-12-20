@@ -41,8 +41,17 @@ Download the latest install or stand alone version from [releases](https://githu
 ### Setup
 
 1. Follow guild to [install prereq for Tauri](https://tauri.app/v1/guides/getting-started/prerequisites). Make sure not to miss the first step of [installing Rust](https://rustup.rs).
-2. Clone this repo
-3. Install npm requirements
+2. Install NPM
+   ```bash
+   > curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash - &&\ sudo apt-get install -y nodejs
+   ```
+4. Install tauri
+   ```bash
+   > cargo install create-tauri-app
+   > cargo install tauri-cli
+   ```
+4. Clone this repo
+5. Install npm requirements
     ```bash
     > npm install
     ```
