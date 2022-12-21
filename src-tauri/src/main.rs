@@ -42,6 +42,7 @@ async fn main() {
             state::close_connection,
             serial::send_message,
             port_list::get_port_list,
+            // port_list::monitor_serial_presence,
         ])
         .setup(move |app| {
             // `main` here is the window label; it is defined on the window creation or under `tauri.conf.json`

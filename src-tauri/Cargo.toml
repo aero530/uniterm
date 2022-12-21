@@ -16,7 +16,7 @@ tauri-build = { version = "1.0.4", features = [] }
 ansi-parser = "0.8.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-tauri = { version = "1.0.5", features = ["devtools", "dialog-all"] }
+tauri = { version = "1.1.0", features = ["devtools", "dialog-all"] }
 tokio-serial = "5.4.3"
 tokio = { version = "1.12.0", features = ["macros", "time", "sync"] }
 tracing = "0.1.35"

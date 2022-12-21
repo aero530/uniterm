@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use tokio_serial::available_ports;
+use tokio::time::{sleep, Duration};
 
 /// Connection location for this port
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -48,4 +49,31 @@ pub async fn get_port_list() -> Result<Vec<SerialPortType>, String> {
         reply.push(o);
     }
     Ok(reply)
+}
+
+// /// Return a list of available ports to the ui
+// #[command]
+// pub async fn monitor_serial_presence() -> Result<Vec<SerialPortType>, String> {
+// }
+
+pub async fn check_port_present(name: String) -> Result<(), String> {
+    loop {
+        let list = get_port_list().await?;
+        let mut present = false;
+        
+        for l in list {
+            // println!("{:?}",l.name);
+            if name.eq(&l.name) {
+                present = true;
+            }
+        }
+
+        if present {
+            // println!("{:?} present",name);
+            sleep(Duration::from_millis(500)).await;
+        } else {
+            // println!("{:?} not present",name);
+            return Err("Connection Lost".to_string());
+        }
+    }
 }
