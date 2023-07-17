@@ -1,6 +1,6 @@
 [package]
 name = "UniTerm"
-version = "0.1.2"
+version = "1.0.0"
 description = "serial terminal"
 authors = ["Phil Spindler"]
 license = ""
@@ -10,15 +10,15 @@ edition = "2021"
 rust-version = "1.57"
 
 [build-dependencies]
-tauri-build = { version = "1.0.4", features = [] }
+tauri-build = { version = "1.4.0", features = [] }
 
 [dependencies]
 ansi-parser = "0.8.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-tauri = { version = "1.0.5", features = ["devtools", "dialog-all"] }
-tokio-serial = "5.4.3"
-tokio = { version = "1.12.0", features = ["macros", "time", "sync"] }
+tauri = { version = "1.4.1", features = ["devtools", "dialog-all"] }
+tokio-serial = "5.4.4"
+tokio = { version = "1.29.1", features = ["macros", "time", "sync"] }
 tracing = "0.1.35"
 tracing-subscriber = "0.3.14"
 

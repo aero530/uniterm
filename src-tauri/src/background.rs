@@ -5,6 +5,7 @@
 use crate::message::Message;
 use crate::serial::run;
 use crate::port_settings::PortSettings;
+use crate::port_list::check_port_present;
 
 use std::thread;
 use tokio::sync::{broadcast, mpsc};
@@ -57,7 +58,6 @@ pub fn spawn(window: tauri::Window, settings: PortSettings) -> (BgHandle, BgComs
     // Errors from start are lost here.  That is why we emit them to the UI from within start / run
     let tokio_thread =
         thread::spawn(move || start(settings, window, stop_sender_2, command_receiver));
-
     (
         BgHandle {
             handle: tokio_thread,
@@ -82,6 +82,7 @@ async fn start(
     stop_sender: broadcast::Sender<()>,
     command_receiver: mpsc::Receiver<Message>,
 ) -> Result<(), String> {
+    let port_name = settings.name.clone();
     let mut stop_receiver = stop_sender.subscribe();
     let handle = task::spawn(async move {
         tokio::select! {
@@ -101,6 +102,16 @@ async fn start(
                 match result_2 {
                     Ok(_) => Ok(()),
                     Err(e) => {
+                        Err(e.to_string())
+                    }
+                }
+            }
+            // Background task to monitor serial port.  This way if connection is lost we can close the port properly
+            result_3 = check_port_present(port_name) => {
+                match result_3 {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        error!("{}",&e);
                         Err(e.to_string())
                     }
                 }
