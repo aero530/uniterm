@@ -9,8 +9,8 @@
 
 	export let port: Connection;
 
-	let box;
-	let autoscroll;
+	let box: HTMLDivElement;
+	let autoscroll: boolean;
 	let is_focused = false;
 
 	function handleKeydown(event) {

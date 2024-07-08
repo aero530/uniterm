@@ -1,12 +1,11 @@
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncWriteExt};
-use tracing::{debug, error};
 use serde::{Deserialize, Serialize};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tracing::error;
 
-use crate::port_settings::{PortSettings};
-use crate::message::DisplayMode;
 use crate::ansi_to_html::ansi_to_html;
-
+use crate::message::DisplayMode;
+use crate::port_settings::PortSettings;
 
 /// Reply format used to send data to the ui
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,8 +61,16 @@ impl Port {
         match self.display_mode {
             DisplayMode::Ascii => String::from_utf8_lossy(bytes).into_owned(),
             DisplayMode::Ansi => ansi_to_html(bytes),
-            DisplayMode::Decimal => bytes.iter().map(|n| format!("{}", n)).collect::<Vec<String>>().join(" "),
-            DisplayMode::Hex => bytes.iter().map(|n| format!("{:#04x}", n)).collect::<Vec<String>>().join(" "),
+            DisplayMode::Decimal => bytes
+                .iter()
+                .map(|n| format!("{}", n))
+                .collect::<Vec<String>>()
+                .join(" "),
+            DisplayMode::Hex => bytes
+                .iter()
+                .map(|n| format!("{:#04x}", n))
+                .collect::<Vec<String>>()
+                .join(" "),
         }
     }
 

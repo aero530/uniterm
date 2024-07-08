@@ -4,14 +4,15 @@
 //! A new background process is spawned for each port.
 
 use crate::background;
-use crate::port_settings::{PortSettings, DataBits, FlowControl, Parity, StopBits};
+use crate::port_settings::{DataBits, FlowControl, Parity, PortSettings, StopBits};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tauri::{command, State};
+use tauri::{command, AppHandle, State};
 use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 /// Connection info stored in the application state
+#[allow(dead_code)]
 pub struct Connection {
     /// Serial port name
     pub name: String,
@@ -44,8 +45,7 @@ impl ArcMutex {
 pub struct AppData {
     /// Map of serial port connections
     pub connections: BTreeMap<String, Connection>,
-    /// Application window
-    pub window: tauri::Window,
+    pub app_handle: AppHandle,
 }
 
 impl AppData {
@@ -56,7 +56,7 @@ impl AppData {
     /// * `settings` - Settings for the serial port to be opened
     pub fn open_connection(&mut self, settings: PortSettings) -> Result<(), String> {
         self.close_connection(&settings.id).unwrap_or_default();
-        let background = background::spawn(self.window.clone(), settings.clone());
+        let background = background::spawn(self.app_handle.clone(), settings.clone());
         let connection = Connection {
             name: settings.name,
             baud_rate: settings.baud_rate,

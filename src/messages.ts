@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
 
 import type {Connection, ConfigType, LogSettingsType} from './stores';
 import { ports } from './stores.js';

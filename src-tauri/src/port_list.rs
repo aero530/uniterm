@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
-use tokio_serial::available_ports;
 use tokio::time::{sleep, Duration};
+use tokio_serial::available_ports;
 
 /// Connection location for this port
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -60,7 +60,7 @@ pub async fn check_port_present(name: String) -> Result<(), String> {
     loop {
         let list = get_port_list().await?;
         let mut present = false;
-        
+
         for l in list {
             // println!("{:?}",l.name);
             if name.eq(&l.name) {

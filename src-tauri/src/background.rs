@@ -3,11 +3,12 @@
 //! Manage background processes to run the serial interfaces.
 
 use crate::message::Message;
-use crate::serial::run;
-use crate::port_settings::PortSettings;
 use crate::port_list::check_port_present;
+use crate::port_settings::PortSettings;
+use crate::serial::run;
 
 use std::thread;
+use tauri::AppHandle;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 use tracing::{debug, error};
@@ -47,9 +48,11 @@ impl BgHandle {
 ///
 /// # Arguments
 ///
-/// * `window` - Number of pixels in the x direction
 /// * `settings` - Settings for the serial port to be opened
-pub fn spawn(window: tauri::Window, settings: PortSettings) -> (BgHandle, BgComs) {
+pub fn spawn(
+    app_handle: AppHandle,
+    settings: PortSettings,
+) -> (BgHandle, BgComs) {
     debug!("Starting background task for port {}", settings.id);
     let (stop_sender, _stop_receiver) = broadcast::channel(1);
     let (command_sender, command_receiver) = mpsc::channel(32);
@@ -57,7 +60,7 @@ pub fn spawn(window: tauri::Window, settings: PortSettings) -> (BgHandle, BgComs
     let stop_sender_2 = stop_sender.clone();
     // Errors from start are lost here.  That is why we emit them to the UI from within start / run
     let tokio_thread =
-        thread::spawn(move || start(settings, window, stop_sender_2, command_receiver));
+        thread::spawn(move || start(settings, app_handle, stop_sender_2, command_receiver));
     (
         BgHandle {
             handle: tokio_thread,
@@ -72,13 +75,13 @@ pub fn spawn(window: tauri::Window, settings: PortSettings) -> (BgHandle, BgComs
 /// # Arguments
 ///
 /// * `settings` - Settings for the serial port to be opened
-/// * `window` - Number of pixels in the x direction
+/// * `app` - app handle
 /// * `stop_receiver` - Communication channel to stop the background process
 /// * `command_receiver` - Communication channel to send commands to the serial port
 #[tokio::main]
 async fn start(
     settings: PortSettings,
-    window: tauri::Window,
+    app: AppHandle,
     stop_sender: broadcast::Sender<()>,
     command_receiver: mpsc::Receiver<Message>,
 ) -> Result<(), String> {
@@ -89,7 +92,7 @@ async fn start(
             // _ = run(options, command_receiver) => {
             // 	return Ok(())
             // }
-            result_1 = run(settings, window, command_receiver) => {
+            result_1 = run(settings, app, command_receiver) => {
                 match result_1 {
                     Ok(_) => Ok(()),
                     Err(e) => {

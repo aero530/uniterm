@@ -4,21 +4,15 @@
 
 use crate::state::AppState;
 
-// use ansi_parser::{Output, AnsiParser};
-// use ansi_parser::AnsiSequence;
-
-// use cansi::*;
-
-use tauri::command;
+use std::cmp::Ordering;
+use tauri::{command, AppHandle, Manager};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
-use std::cmp::Ordering;
 
-
-use crate::port::{Port, SerialReply};
-use crate::port_settings::{PortSettings};
 use crate::message::{DisplayMode, Message, MessageCommand, MessageData};
+use crate::port::{Port, SerialReply};
+use crate::port_settings::PortSettings;
 
 /// Wrapper to expose sending data over the serial port to the ui
 ///
@@ -63,30 +57,24 @@ pub async fn send_message(state: AppState<'_>, id: String, message: Message) -> 
 /// * `command_receiver` - Communication channel to send commands to the serial port
 pub async fn run(
     settings: PortSettings,
-    window: tauri::Window,
+    app: AppHandle,
     mut command_receiver: mpsc::Receiver<Message>,
 ) -> Result<(), String> {
     let mut serial = match tokio_serial::SerialStream::open(
-        &tokio_serial::new(
-            &settings.name,
-            settings.baud_rate,
-        )
-        .data_bits(settings.data_bits.clone().into())
-        .flow_control(settings.flow_control.clone().into())
-        .parity(settings.parity.clone().into())
-        .stop_bits(settings.stop_bits.clone().into())
+        &tokio_serial::new(&settings.name, settings.baud_rate)
+            .data_bits(settings.data_bits.clone().into())
+            .flow_control(settings.flow_control.clone().into())
+            .parity(settings.parity.clone().into())
+            .stop_bits(settings.stop_bits.clone().into()),
     ) {
         Ok(p) => p,
         Err(e) => {
             let payload = SerialReply {
                 id: settings.id,
                 command: "close".to_string(),
-                data: format!(
-                    "Unable to open port. {:#?} {:#?}",
-                    e.kind, e.description
-                ),
+                data: format!("Unable to open port. {:#?} {:#?}", e.kind, e.description),
             };
-            let _ = window.emit("serial", payload);
+            let _ = app.emit("serial", payload);
             return Err(format!("Unable to open serial port. {:#?}", e));
         }
     };
@@ -140,7 +128,8 @@ pub async fn run(
                                         let mut new = vec![0; at];
                                         // if output doe not start with a null char add a new line char to seperate
                                         // the nulls we are adding from the existing data in output
-                                        if !port_wrapper.output.is_empty() && port_wrapper.output[0] != 0
+                                        if !port_wrapper.output.is_empty()
+                                            && port_wrapper.output[0] != 0
                                         {
                                             // add a new line if there isn't one
                                             new.push(10);
@@ -149,7 +138,7 @@ pub async fn run(
                                         new.append(&mut port_wrapper.output);
                                         // update output with the new vector
                                         port_wrapper.output = new;
-                                    },
+                                    }
                                     Ordering::Less => {
                                         let at = port_wrapper.max_bytes - data.max_bytes;
                                         // debug!("at {:#?}", at);
@@ -157,8 +146,8 @@ pub async fn run(
                                             let v2 = port_wrapper.output.split_off(at);
                                             port_wrapper.output = v2;
                                         }
-                                    },
-                                    Ordering::Equal => {},
+                                    }
+                                    Ordering::Equal => {}
                                 }
 
                                 port_wrapper.max_bytes = data.max_bytes;
@@ -168,7 +157,7 @@ pub async fn run(
                                 let payload = port_wrapper.package_output();
                                 match payload {
                                     Some(p) => {
-                                        window.emit("serial", p).map_err(|e| {
+                                        app.emit("serial", p).map_err(|e| {
                                             format!("Unable to send to the UI. {}", e)
                                         })?;
                                     }
@@ -179,23 +168,25 @@ pub async fn run(
                                 debug!("Data format unknown");
                             }
                         }
-                    },
+                    }
                     MessageCommand::Clear => {
                         port_wrapper.output.clear();
                         let payload = port_wrapper.package_output();
                         match payload {
                             Some(p) => {
-                                window
+                                app
                                     .emit("serial", p)
                                     .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                             }
                             None => {}
                         }
-                    },
-                    MessageCommand::Logging => if let MessageData::LogSettings(data) = message.package {
-                        port_wrapper.log_enabled = data.enabled;
-                        port_wrapper.log_path = data.path;
-                    },
+                    }
+                    MessageCommand::Logging => {
+                        if let MessageData::LogSettings(data) = message.package {
+                            port_wrapper.log_enabled = data.enabled;
+                            port_wrapper.log_path = data.path;
+                        }
+                    }
                 }
             }
             Err(_e) => {} // if there is nothing to rx then move on with life
@@ -222,25 +213,25 @@ pub async fn run(
                         port_wrapper.output = temp;
                     }
                 }
-                
+
                 // Send the new bytes to the UI
                 match port_wrapper.display_mode {
                     DisplayMode::Ansi => {
                         let payload = port_wrapper.package_output();
                         match payload {
                             Some(p) => {
-                                window
+                                app
                                     .emit("serial", p)
                                     .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                             }
                             None => {}
                         }
-                    },
+                    }
                     _ => {
                         let payload = port_wrapper.package_buffer(count);
                         match payload {
                             Some(p) => {
-                                window
+                                app
                                     .emit("serial", p)
                                     .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                             }
@@ -248,22 +239,19 @@ pub async fn run(
                         }
                     }
                 }
-
 
                 // If logging is enabled, write the new bytes to the log file
                 if port_wrapper.log_enabled {
                     let payload = port_wrapper.log_buffer(count).await;
                     match payload {
                         Some(p) => {
-                            window
+                            app
                                 .emit("serial", p)
                                 .map_err(|e| format!("Unable to send to log to file. {}", e))?;
                         }
                         None => {}
                     }
                 }
-
-                
             }
             Err(_e) => {} // if there is nothing to read then move on with life
         };

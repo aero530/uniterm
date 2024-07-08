@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 /// Settings to configure the serial port
 #[derive(Clone)]
 pub struct PortSettings {
@@ -32,7 +31,7 @@ pub enum FlowControl {
 }
 
 impl From<FlowControl> for tokio_serial::FlowControl {
-    fn from(value : FlowControl) -> Self {
+    fn from(value: FlowControl) -> Self {
         match value {
             FlowControl::None => tokio_serial::FlowControl::None,
             FlowControl::Software => tokio_serial::FlowControl::Software,
@@ -55,7 +54,7 @@ pub enum DataBits {
 }
 
 impl From<DataBits> for tokio_serial::DataBits {
-    fn from(value : DataBits) -> Self {
+    fn from(value: DataBits) -> Self {
         match value {
             DataBits::Five => tokio_serial::DataBits::Five,
             DataBits::Six => tokio_serial::DataBits::Six,
@@ -67,8 +66,8 @@ impl From<DataBits> for tokio_serial::DataBits {
 
 /// Parity checking modes
 ///
-/// When parity checking is enabled (Odd or Even) an extra bit is transmitted with each character. The value of 
-/// the parity bit is arranged so that the number of 1 bits in the character (including the parity bit) is an 
+/// When parity checking is enabled (Odd or Even) an extra bit is transmitted with each character. The value of
+/// the parity bit is arranged so that the number of 1 bits in the character (including the parity bit) is an
 /// even number (Even) or an odd number (Odd).
 ///
 /// Parity checking is disabled by setting None, in which case parity bits are not transmitted.
@@ -83,7 +82,7 @@ pub enum Parity {
 }
 
 impl From<Parity> for tokio_serial::Parity {
-    fn from(value : Parity) -> Self {
+    fn from(value: Parity) -> Self {
         match value {
             Parity::None => tokio_serial::Parity::None,
             Parity::Odd => tokio_serial::Parity::Odd,
@@ -104,7 +103,7 @@ pub enum StopBits {
 }
 
 impl From<StopBits> for tokio_serial::StopBits {
-    fn from(value : StopBits) -> Self {
+    fn from(value: StopBits) -> Self {
         match value {
             StopBits::One => tokio_serial::StopBits::One,
             StopBits::Two => tokio_serial::StopBits::Two,

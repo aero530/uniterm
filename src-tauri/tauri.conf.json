@@ -1,60 +1,34 @@
 {
+  "productName": "UniTerm",
+  "version": "2.0.0",
+  "identifier": "com.aero530.dev",
   "build": {
-    "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
-    "devPath": "http://localhost:3000",
-    "distDir": "../dist"
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
   },
-  "package": {
-    "productName": "UniTerm",
-    "version": "1.0.0"
-  },
-  "tauri": {
-    "allowlist": {
-      "dialog": {
-        "all": true,
-        "open": true,
-        "save": true
+  "app": {
+    "windows": [
+      {
+        "title": "UniTerm",
+        "width": 1600,
+        "height": 1200
       }
-    },
-    "bundle": {
-      "active": true,
-      "category": "DeveloperTool",
-      "copyright": "",
-      "deb": {
-        "depends": []
-      },
-      "externalBin": [],
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ],
-      "identifier": "com.aero530.dev",
-      "longDescription": "",
-      "macOS": {
-        "entitlements": null,
-        "exceptionDomain": "",
-        "frameworks": [],
-        "providerShortName": null,
-        "signingIdentity": null
-      },
-      "resources": [],
-      "shortDescription": "",
-      "targets": "all",
-      "windows": {
-        "certificateThumbprint": null,
-        "digestAlgorithm": "sha256",
-        "timestampUrl": ""
-      }
-    },
+    ],
     "security": {
-      "csp": null
-    },
-    "updater": {
-      "active": false
+      "csp": "default-src blob: data: filesystem: ws: wss: http: https: tauri: 'unsafe-eval' 'unsafe-inline' 'self' img-src: 'self'"
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../resources/icons/32x32.png",
+      "../resources/icons/128x128.png",
+      "../resources/icons/256x256.png",
+      "../resources/icon.icns",
+      "../resources/icon.ico"
+    ]
   }
 }

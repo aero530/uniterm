@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { invoke } from "@tauri-apps/api/tauri";
-	import { save } from '@tauri-apps/api/dialog';
+	import { invoke } from "@tauri-apps/api/core";
+	import { save } from '@tauri-apps/plugin-dialog';
 	import { beforeUpdate } from "svelte";
 	import { serial_list, ports } from '../stores.js';
 	
@@ -26,7 +26,7 @@
 		.finally(() => {
 			updateDisplayConfig();
 		})
-		.catch((error) => {
+		.catch((error: string) => {
 			alert(error);
 			console.error(error);
 			checkError(port, error);
@@ -35,23 +35,23 @@
 	
 	function closeLink() {
 		invoke("close_connection", {id: port.id})
-		.then((data) => {
+		.then((data: any) => {
 			ports.setIsActive(port.id, false);
 		})
-		.catch((error) => {
+		.catch((error: any) => {
 			alert(error);
 			console.error(error);
 		});
 	}
 	
 	function removeConnection() {
-		// diconnect if connected
+		// disconnect if connected
 		if (port.is_active) {
 			invoke("close_connection", {id: port.id})
 			.then(() => {
 				ports.removePort(port.id);
 			})
-			.catch((error) => {
+			.catch((error: any) => {
 				alert(error);
 				console.error(error);
 			});
@@ -124,7 +124,7 @@
 				extensions: ['txt']
 			}]
 		});
-		filepathPromise.then( filepath => {
+		filepathPromise.then( (filepath: string | any[]) => {
 			// filepath will be empty string if cancel button is pressed.
 			// In that case, don't update the path string
 			if (filepath.length > 0) {
@@ -150,6 +150,7 @@
 	<div class="flex flex-row place-content-between">
 		<div>
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.name}
 				disabled={port.is_active}
 				>
@@ -158,6 +159,7 @@
 				{/each}
 			</select>
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.baud_rate}
 				disabled={port.is_active}
 			>
@@ -169,6 +171,7 @@
 			</select>
 
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.flow_control}
 				disabled={port.is_active}
 			>
@@ -180,6 +183,7 @@
 			</select>
 		
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.data_bits}
 				disabled={port.is_active}
 			>
@@ -191,6 +195,7 @@
 			</select>
 			
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.parity}
 				disabled={port.is_active}
 			>
@@ -202,6 +207,7 @@
 			</select>
 			
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={port.stop_bits}
 				disabled={port.is_active}
 			>
@@ -215,13 +221,19 @@
 		</div>
 
 		<div class="flex flex-wrap items-start justify-end gap-1">
-			<button on:click={() => openLink()} disabled={port.is_active}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => openLink()} disabled={port.is_active}>
 				Connect
 			</button>
-			<button on:click={() => closeLink()} disabled={!port.is_active}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => closeLink()} disabled={!port.is_active}>
 				Disconnect
 			</button>
-			<button on:click={() => removeConnection()} disabled={port.is_active}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => removeConnection()} disabled={port.is_active}>
 				Remove
 			</button>
 		</div>
@@ -232,6 +244,7 @@
 			<div>
 				Display Mode 
 				<select
+					class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 					bind:value={selected_display_mode}
 					on:change={() => updateDisplayConfig()}
 					>
@@ -248,7 +261,9 @@
 		</div>
 
 		<div>
-			<button on:click={() => sendClear(port)} disabled={!port.is_active}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => sendClear(port)} disabled={!port.is_active}>
 				Clear
 			</button>
 		</div>
@@ -260,12 +275,15 @@
 			{#if port.log_path}
 			{port.log_path}
 			{/if}
-			<button on:click={() => getSavePath()}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => getSavePath()}>
 				Set Path
 			</button>			
 		</div>
 		<div>
 			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
 				on:click={() => {
 					port.is_logging = !port.is_logging;
 					updateLogSettings();
@@ -283,6 +301,7 @@
 		<div>
 			as 
 			<select
+				class="bg-gray-200 border border-gray-500 text-gray-700 py-1 px-1 rounded leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
 				bind:value={selected_send_mode}
 				>
 				{#each sendMode as mode}
@@ -297,38 +316,14 @@
 			<div><input type=checkbox bind:checked={include_lf}>+LF</div>
 		</div>
 		<div>
-			<button on:click={() => sendCommand(port, inputData, selected_send_mode, include_cr, include_lf)} disabled={!port.is_active}>
+			<button 
+				class="bg-logo-blue text-black rounded w-24 text-sm px-1 py-1 text-center disabled:bg-gray-300 disabled:text-gray-500"
+				on:click={() => sendCommand(port, inputData, selected_send_mode, include_cr, include_lf)}
+				disabled={!port.is_active}
+			>
 				Send
 			</button>
 		</div>
 	</div>
 
 </div>
-
-<style lang="postcss">
-	button {
-		@apply bg-logo-blue;
-		@apply text-black;
-		@apply rounded;
-		@apply w-24;
-		@apply text-sm;
-		@apply px-1;
-		@apply py-1;
-		@apply text-center;
-		@apply "disabled:bg-gray-300";
-		@apply "disabled:text-gray-500";
-	}
-	select {
-		@apply bg-gray-200;
-		@apply border;
-		@apply border-gray-500;
-		@apply text-gray-700;
-		@apply py-1;
-		@apply px-1;
-		@apply rounded;
-		@apply leading-tight;
-		@apply "focus:outline-none";
-		@apply "focus:bg-white";
-		@apply "focus:border-gray-500";
-	}
-</style>
