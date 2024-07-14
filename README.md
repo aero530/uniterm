@@ -39,34 +39,22 @@ Download the latest install or stand alone version from [releases](https://githu
 
 ### Setup
 
-1. Follow guild to [install prereq for Tauri](https://tauri.app/v1/guides/getting-started/prerequisites). Make sure not to miss the first step of [installing Rust](https://rustup.rs).
-2. Install NPM
+1. Follow guild to [install pre req for Tauri 2.0](https://v2.tauri.app/start/prerequisites/). Make sure not to miss the first step of [installing Rust](https://rustup.rs).
 
-  ```bash
-  > curl -fsSL https://deb.nodesource.com/setup_19.x | sudo -E bash - &&\ sudo apt-get install -y nodejs
-  ```
-
-3. Install tauri
-
-  ```bash
-  > cargo install create-tauri-app
-  > cargo install tauri-cli
-  ```
-
-4. Clone this repo
-5. Install npm requirements
+2. Clone this repo
+3. Install npm requirements
 
   ```bash
   > npm install
   ```
 
-6. Run in dev mode
+4. Run in dev mode (this may need to be done from system terminal not vscode)
 
   ```bash
   > cargo tauri dev
   ```
 
-7. Build release files
+5. Build release files (these may need to be executed from command line because of some webgtk bug)
 
   ```bash
   > cargo tauri build
@@ -78,12 +66,4 @@ Occationally messages will pop up when running the dev compiler that say there i
 
 ```bash
 > cargo install tauri-cli
-```
-
-### Generating icon files
-
-Tauri will convert an svg image to all the icon files needed and put them in the correct folder for you.
-
-```bash
-> npx @tauri-apps/tauricon icon.svg
 ```

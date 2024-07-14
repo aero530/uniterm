@@ -47,10 +47,10 @@ impl ActiveStyles<'_> {
         if self.underline {
             styles.push("text-decoration:underline;")
         };
-        if self.text.len() > 0 {
+        if !self.text.is_empty() {
             styles.push(self.text)
         };
-        if self.bg.len() > 0 {
+        if !self.bg.is_empty() {
             styles.push(self.bg)
         };
         styles.join(" ")
@@ -90,7 +90,7 @@ pub fn ansi_to_html(bytes: &[u8]) -> String {
             }
         }
 
-        if text.len() > 0 {
+        if !text.is_empty() {
             // Replacing line breaks with this div requires the container to be "flex" & "flex-wrap"
             let eols = text
                 .matches("\r\n")

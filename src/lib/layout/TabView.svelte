@@ -19,6 +19,3 @@
 		{/each}
 	{/if}
 </Tabs>
-
-<style>
-</style>

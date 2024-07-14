@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { listen, emit } from "@tauri-apps/api/event";
+	import { listen, type Event, type UnlistenFn } from "@tauri-apps/api/event";
 	import { onMount, onDestroy } from "svelte";
 	import { invoke } from "@tauri-apps/api/core";
 	import Icon from "@iconify/svelte";
@@ -14,7 +14,13 @@
 	import LayoutQuad from "../lib/layout/Quad.svelte";
 	import type { SerialPortType } from "../stores";
 
-	let unlisten_serial;
+	interface SerialReply {
+		id: string
+		command: string;
+		data: string;
+	}
+
+	let unlisten_serial: UnlistenFn;
 
 	const pages = [
 		{ text: "Single", value: LayoutSingle, to: "Single" },
@@ -25,7 +31,7 @@
 	let selected = pages[0];
 
 	function refreshSerialList() {
-		invoke("get_port_list").then((data: [SerialPortType]) => {
+		(invoke("get_port_list") as Promise<SerialPortType[]>).then(data => {
 			serial_list.set(data);
 		});
 	}
@@ -33,7 +39,7 @@
 	onMount(async () => {
 		refreshSerialList();
 
-		unlisten_serial = await listen("serial", (event) => {
+		unlisten_serial = await listen("serial", (event: Event<SerialReply>) => {
 			switch (event.payload.command) {
 				case "rx_bytes":
 					console.log(event.payload.data);

@@ -5,7 +5,7 @@
 use crate::state::AppState;
 
 use std::cmp::Ordering;
-use tauri::{command, AppHandle, Manager};
+use tauri::{command, AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
@@ -155,13 +155,10 @@ pub async fn run(
 
                                 // resend output based on new display settings
                                 let payload = port_wrapper.package_output();
-                                match payload {
-                                    Some(p) => {
-                                        app.emit("serial", p).map_err(|e| {
-                                            format!("Unable to send to the UI. {}", e)
-                                        })?;
-                                    }
-                                    None => {}
+                                if let Some(p) = payload {
+                                    app.emit("serial", p).map_err(|e| {
+                                        format!("Unable to send to the UI. {}", e)
+                                    })?;
                                 }
                             }
                             _ => {
@@ -172,13 +169,10 @@ pub async fn run(
                     MessageCommand::Clear => {
                         port_wrapper.output.clear();
                         let payload = port_wrapper.package_output();
-                        match payload {
-                            Some(p) => {
-                                app
-                                    .emit("serial", p)
-                                    .map_err(|e| format!("Unable to send to the UI. {}", e))?;
-                            }
-                            None => {}
+                        if let Some(p) = payload {
+                            app
+                                .emit("serial", p)
+                                .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                         }
                     }
                     MessageCommand::Logging => {
@@ -218,24 +212,18 @@ pub async fn run(
                 match port_wrapper.display_mode {
                     DisplayMode::Ansi => {
                         let payload = port_wrapper.package_output();
-                        match payload {
-                            Some(p) => {
-                                app
-                                    .emit("serial", p)
-                                    .map_err(|e| format!("Unable to send to the UI. {}", e))?;
-                            }
-                            None => {}
+                        if let Some(p) = payload {
+                            app
+                                .emit("serial", p)
+                                .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                         }
                     }
                     _ => {
                         let payload = port_wrapper.package_buffer(count);
-                        match payload {
-                            Some(p) => {
-                                app
-                                    .emit("serial", p)
-                                    .map_err(|e| format!("Unable to send to the UI. {}", e))?;
-                            }
-                            None => {}
+                        if let Some(p) = payload {
+                            app
+                                .emit("serial", p)
+                                .map_err(|e| format!("Unable to send to the UI. {}", e))?;
                         }
                     }
                 }
@@ -243,13 +231,10 @@ pub async fn run(
                 // If logging is enabled, write the new bytes to the log file
                 if port_wrapper.log_enabled {
                     let payload = port_wrapper.log_buffer(count).await;
-                    match payload {
-                        Some(p) => {
-                            app
-                                .emit("serial", p)
-                                .map_err(|e| format!("Unable to send to log to file. {}", e))?;
-                        }
-                        None => {}
+                    if let Some(p) = payload {
+                        app
+                            .emit("serial", p)
+                            .map_err(|e| format!("Unable to send to log to file. {}", e))?;
                     }
                 }
             }

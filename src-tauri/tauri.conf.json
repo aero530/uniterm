@@ -28,7 +28,8 @@
       "../resources/icons/128x128.png",
       "../resources/icons/256x256.png",
       "../resources/icon.icns",
-      "../resources/icon.ico"
+      "../resources/icon.ico",
+      "../static/favicon.png"
     ]
   }
 }

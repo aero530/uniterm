@@ -1,4 +1,8 @@
-export let asciiCodes = {
+interface AsciiCodes {
+    [key: string]: number
+}
+
+export let asciiCodes: AsciiCodes= {
     "NUL":	0,
     "SOH":	1,
     "STX":	2,

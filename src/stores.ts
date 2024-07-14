@@ -9,12 +9,14 @@ export type SerialPortType = {
     manufacturer: string,
 };
 
+type SerialListType = SerialPortType[];
+
 function createSerialList() {
-	const { subscribe, set } = writable([]);
+	const { subscribe, set } = writable<SerialListType>([]);
 
 	return {
 		subscribe,
-        set: (input: [SerialPortType]) => set(input),
+        set: (input: SerialPortType[]) => set(input),
 		reset: () => set([])
 	};
 }
@@ -92,8 +94,8 @@ function createConnection() {
             });
         },
 		removePort: (id: string) => {
-            update(current => {
-                current = current.filter(port => port.id != id);
+            update(current=> {
+				current = current.filter(port => port.id != id);
 				return current;
             });
         },

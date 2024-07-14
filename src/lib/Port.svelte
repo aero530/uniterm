@@ -10,6 +10,3 @@
 	<PortView bind:port={port}/>
 	<PortMenu bind:port={port}/>
 </div>
-
-<style>
-</style>

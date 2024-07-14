@@ -1,7 +1,6 @@
 {
-  "identifier": "migrated",
-  "description": "permissions that were migrated from v1",
-  "local": true,
+  "identifier": "default",
+  "description": "Capability for the main window",
   "windows": [
     "main"
   ],
@@ -13,11 +12,13 @@
     "resources:default",
     "menu:default",
     "tray:default",
+    "shell:allow-open",
+    "fs:allow-write-text-file",
+    "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-message",
     "dialog:allow-ask",
-    "dialog:allow-confirm",
-    "dialog:default"
+    "dialog:allow-confirm"
   ]
 }

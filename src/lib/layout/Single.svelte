@@ -6,6 +6,3 @@
 <Splitpanes class="default-theme">
     <Pane><TabView/></Pane>
 </Splitpanes>
-  
-<style>
-</style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-    export let values = [];
+    export let values: string[] = [];
     export let value: string;
 </script>
 
@@ -11,7 +11,3 @@
         <option value={option}>{option}</option>
     {/each}
 </select>
-
-<style>
-    
-</style>

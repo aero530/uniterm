@@ -13,7 +13,7 @@
 	let autoscroll: boolean;
 	let is_focused = false;
 
-	function handleKeydown(event) {
+	function handleKeydown(event: KeyboardEvent) {
 		if (is_focused) {
 			let byte: number;
 
@@ -49,9 +49,9 @@ basis-full : forces the div to be as tall as possible
 overflow-scroll : allows scrolling within the div
 whitespace-pre : Formats white space as it is in the string (spaces and line breaks show up)	
 -->
-
 <div 
 	tabindex="0"
+	role="textbox"
 	bind:this={box}
 	on:keydown|preventDefault={handleKeydown}
 	on:focus={() => changeFocus(true)}
@@ -67,6 +67,3 @@ whitespace-pre : Formats white space as it is in the string (spaces and line bre
 </div>
 <!-- The code block inside the text area must not have any whitespace before it or it will display 
 in the UI.  So this code block can not be indented for readability in the source. -->
-
-<style>
-</style>

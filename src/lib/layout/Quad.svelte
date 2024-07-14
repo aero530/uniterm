@@ -17,6 +17,3 @@
 		</Splitpanes>
 	</Pane>
 </Splitpanes>
-
-<style>
-</style>

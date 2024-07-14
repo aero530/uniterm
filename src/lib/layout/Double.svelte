@@ -7,6 +7,3 @@
 	<Pane><TabView/></Pane>
     <Pane><TabView/></Pane>
 </Splitpanes>
-  
-<style>
-</style>

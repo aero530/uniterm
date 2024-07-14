@@ -124,11 +124,13 @@
 				extensions: ['txt']
 			}]
 		});
-		filepathPromise.then( (filepath: string | any[]) => {
+		filepathPromise.then( (filepath: string | null) => { // | any[]
 			// filepath will be empty string if cancel button is pressed.
 			// In that case, don't update the path string
-			if (filepath.length > 0) {
-				ports.setLogFile(port.id, filepath);
+			if (filepath) {
+				if (filepath.length > 0) {
+					ports.setLogFile(port.id, filepath);
+				}
 			}
 		}).finally(() => updateLogSettings())
 	}
@@ -137,7 +139,7 @@
 	beforeUpdate(() => {
 		if (!port.name) {
 			if ($serial_list.length > 0) {
-				port.name = $serial_list[0];
+				port.name = $serial_list[0].name;
 			} else {
 				port.name = ""
 			}
@@ -256,7 +258,7 @@
 				</select>
 			</div>
 			<div>
-				Scrollback Size: <input type=range min={2000} max={2000000} step={1000} bind:value={selected_display_size} on:change={() => updateDisplayConfig()}> ({selected_display_size/1000}k)
+				Scroll Back Size: <input type=range min={2000} max={2000000} step={1000} bind:value={selected_display_size} on:change={() => updateDisplayConfig()}> ({selected_display_size/1000}k)
 			</div>
 		</div>
 
@@ -325,5 +327,4 @@
 			</button>
 		</div>
 	</div>
-
 </div>

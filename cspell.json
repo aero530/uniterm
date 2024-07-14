@@ -3,10 +3,16 @@
         "autoscroll",
         "coms",
         "divs",
+        "icns",
+        "iconify",
+        "kbaud",
+        "Mbaud",
+        "serde",
         "splitpanes",
         "tailwindcss",
         "tauri",
         "uicons",
-        "uniterm"
+        "uniterm",
+        "unlisten"
     ]
 }
