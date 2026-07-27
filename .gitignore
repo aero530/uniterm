@@ -11,3 +11,4 @@ logs
 build/
 node_modules/
 .svelte-kit/
+.claude
