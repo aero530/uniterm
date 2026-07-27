@@ -1,0 +1,37 @@
+[package]
+name = "uniterm"
+version = "3.0.0-dev"
+description = "Serial port terminal"
+authors = ["Phil Spindler"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.85"
+
+[[bin]]
+name = "UniTerm"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26"
+eframe = "0.35"
+egui_dock = "0.20"
+rfd = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
+tokio-serial = "5.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 2
+strip = true

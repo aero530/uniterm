@@ -1,0 +1,314 @@
+//! Connection and display settings.
+//!
+//! Ported from the Tauri build's `port_settings.rs` and the display-mode half of
+//! `message.rs`. These types are deliberately free of any UI or transport dependency so
+//! that the SSH work (plan task 2) can wrap them in a `ConnectionKind` enum without
+//! touching the widgets.
+
+use serde::{Deserialize, Serialize};
+
+/// Everything needed to open a serial port.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SerialSettings {
+    /// Port name, e.g. `COM3` or `/dev/ttyUSB0`.
+    pub name: String,
+    /// Connection speed in baud.
+    pub baud_rate: u32,
+    pub data_bits: DataBits,
+    pub flow_control: FlowControl,
+    pub parity: Parity,
+    pub stop_bits: StopBits,
+}
+
+impl Default for SerialSettings {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            baud_rate: 115_200,
+            data_bits: DataBits::Eight,
+            flow_control: FlowControl::None,
+            parity: Parity::None,
+            stop_bits: StopBits::One,
+        }
+    }
+}
+
+/// Flow control modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowControl {
+    /// No flow control.
+    #[default]
+    None,
+    /// Flow control using XON/XOFF bytes.
+    Software,
+    /// Flow control using RTS/CTS signals.
+    Hardware,
+}
+
+impl From<FlowControl> for tokio_serial::FlowControl {
+    fn from(value: FlowControl) -> Self {
+        match value {
+            FlowControl::None => Self::None,
+            FlowControl::Software => Self::Software,
+            FlowControl::Hardware => Self::Hardware,
+        }
+    }
+}
+
+/// Number of bits per character.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataBits {
+    Five,
+    Six,
+    Seven,
+    #[default]
+    Eight,
+}
+
+impl From<DataBits> for tokio_serial::DataBits {
+    fn from(value: DataBits) -> Self {
+        match value {
+            DataBits::Five => Self::Five,
+            DataBits::Six => Self::Six,
+            DataBits::Seven => Self::Seven,
+            DataBits::Eight => Self::Eight,
+        }
+    }
+}
+
+/// Parity checking modes.
+///
+/// When parity checking is enabled an extra bit is transmitted with each character, chosen
+/// so the number of 1 bits (including the parity bit) is even (`Even`) or odd (`Odd`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Parity {
+    #[default]
+    None,
+    Odd,
+    Even,
+}
+
+impl From<Parity> for tokio_serial::Parity {
+    fn from(value: Parity) -> Self {
+        match value {
+            Parity::None => Self::None,
+            Parity::Odd => Self::Odd,
+            Parity::Even => Self::Even,
+        }
+    }
+}
+
+/// Number of stop bits transmitted after every character.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StopBits {
+    #[default]
+    One,
+    Two,
+}
+
+impl From<StopBits> for tokio_serial::StopBits {
+    fn from(value: StopBits) -> Self {
+        match value {
+            StopBits::One => Self::One,
+            StopBits::Two => Self::Two,
+        }
+    }
+}
+
+/// How incoming bytes are interpreted for display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplayMode {
+    /// Text, with escape sequences shown as visible control pictures.
+    #[default]
+    Ascii,
+    /// Text, with SGR escape sequences applied as colours and attributes.
+    Ansi,
+    /// One decimal number per byte.
+    Decimal,
+    /// One hex number per byte.
+    Hex,
+}
+
+/// How text typed into the send box is converted to bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SendMode {
+    #[default]
+    Ascii,
+    Decimal,
+    Hex,
+}
+
+/// Baud rates offered in the UI. Ported from `PortMenuOptions.ts`.
+pub const BAUD_RATES: &[u32] = &[
+    300, 600, 1200, 1800, 2400, 4000, 4800, 7200, 9600, 14_400, 16_000, 19_200, 28_800, 38_400,
+    51_200, 56_000, 57_600, 64_000, 76_800, 115_200, 128_000, 153_600, 230_400, 250_000, 256_000,
+    460_800, 500_000, 576_000, 921_600, 1_000_000, 1_200_000, 1_500_000, 2_000_000, 2_250_000,
+    3_000_000, 4_500_000,
+];
+
+/// Render a baud rate the way the old dropdown did.
+pub fn baud_label(baud: u32) -> String {
+    if baud >= 1_000_000 {
+        format!("{:.2} Mbaud", baud as f64 / 1e6)
+    } else if baud >= 10_000 {
+        format!("{:.1} kbaud", baud as f64 / 1e3)
+    } else {
+        format!("{baud} baud")
+    }
+}
+
+impl FlowControl {
+    pub const ALL: &'static [Self] = &[Self::None, Self::Software, Self::Hardware];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "No Flow Ctrl",
+            Self::Software => "Software",
+            Self::Hardware => "Hardware",
+        }
+    }
+}
+
+impl DataBits {
+    pub const ALL: &'static [Self] = &[Self::Five, Self::Six, Self::Seven, Self::Eight];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Five => "Five Data Bits",
+            Self::Six => "Six Data Bits",
+            Self::Seven => "Seven Data Bits",
+            Self::Eight => "Eight Data Bits",
+        }
+    }
+}
+
+impl Parity {
+    pub const ALL: &'static [Self] = &[Self::None, Self::Odd, Self::Even];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "No Parity",
+            Self::Odd => "Odd Parity",
+            Self::Even => "Even Parity",
+        }
+    }
+}
+
+impl StopBits {
+    pub const ALL: &'static [Self] = &[Self::One, Self::Two];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::One => "One Stop Bit",
+            Self::Two => "Two Stop Bits",
+        }
+    }
+}
+
+impl DisplayMode {
+    pub const ALL: &'static [Self] = &[Self::Ascii, Self::Ansi, Self::Decimal, Self::Hex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ascii => "ASCII",
+            Self::Ansi => "ANSI",
+            Self::Decimal => "Decimal",
+            Self::Hex => "Hex",
+        }
+    }
+}
+
+impl SendMode {
+    pub const ALL: &'static [Self] = &[Self::Ascii, Self::Decimal, Self::Hex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ascii => "Ascii",
+            Self::Decimal => "Decimal",
+            Self::Hex => "Hex",
+        }
+    }
+}
+
+/// Parse the contents of the send box into raw bytes.
+///
+/// Returns an error message suitable for showing to the user, matching the alerts the
+/// Svelte `sendCommand` used to raise.
+pub fn encode_send(
+    text: &str,
+    mode: SendMode,
+    append_cr: bool,
+    append_lf: bool,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    match mode {
+        SendMode::Ascii => out.extend_from_slice(text.as_bytes()),
+        SendMode::Decimal | SendMode::Hex => {
+            let radix = if matches!(mode, SendMode::Decimal) { 10 } else { 16 };
+            for token in text.split([' ', ',', '\t']).filter(|t| !t.is_empty()) {
+                let value = u32::from_str_radix(token, radix)
+                    .map_err(|_| format!("`{token}` is not a valid {} value.", mode.label()))?;
+                if value > 0xFF {
+                    return Err(format!(
+                        "Data is sent as bytes, so values must be <= 255 (0xFF). Got `{token}`. \
+                         Separate multiple bytes with a comma or space."
+                    ));
+                }
+                out.push(value as u8);
+            }
+        }
+    }
+    if append_cr {
+        out.push(b'\r');
+    }
+    if append_lf {
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_send_appends_line_endings() {
+        assert_eq!(encode_send("hi", SendMode::Ascii, true, true).unwrap(), b"hi\r\n");
+        assert_eq!(encode_send("hi", SendMode::Ascii, false, false).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn numeric_send_accepts_comma_and_space() {
+        assert_eq!(
+            encode_send("1, 2 3", SendMode::Decimal, false, false).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            encode_send("0a,ff", SendMode::Hex, false, false).unwrap(),
+            vec![0x0a, 0xff]
+        );
+    }
+
+    #[test]
+    fn numeric_send_rejects_out_of_range() {
+        assert!(encode_send("255", SendMode::Decimal, false, false).is_ok());
+        assert!(encode_send("256", SendMode::Decimal, false, false).is_err());
+        assert!(encode_send("ff", SendMode::Hex, false, false).is_ok());
+        // 0x100 is 256, one past a byte.
+        assert!(encode_send("100", SendMode::Hex, false, false).is_err());
+        assert!(encode_send("1FF", SendMode::Hex, false, false).is_err());
+    }
+
+    #[test]
+    fn numeric_send_rejects_garbage() {
+        assert!(encode_send("zz", SendMode::Hex, false, false).is_err());
+    }
+
+    #[test]
+    fn baud_labels_match_old_dropdown() {
+        assert_eq!(baud_label(300), "300 baud");
+        assert_eq!(baud_label(9600), "9600 baud");
+        assert_eq!(baud_label(115_200), "115.2 kbaud");
+        assert_eq!(baud_label(1_000_000), "1.00 Mbaud");
+    }
+}
