@@ -6,6 +6,24 @@ Planning document for six proposed features. Written against the tree at commit 
 > For the egui vs gpui framework decision behind Task 1, see
 > [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md).
 
+> **Status: all six tasks are implemented** on branch `feat/egui-port`. The estimates and
+> analysis below are kept as written, so they can be compared against what actually happened.
+> Corrections found during implementation:
+>
+> * **eframe 0.35's `persistence` feature works.** An initial report that it was unbuildable
+>   (needing an unpublished `ron 0.12.2`) was a stale local registry index, not a real conflict.
+> * **egui 0.35 is a much larger API break than assumed.** `App::update(ctx)` became
+>   `App::ui(&mut Ui)`, `TopBottomPanel`/`SidePanel` merged into one `Panel`, and `ctx.style()`
+>   became `style_of(theme)`.
+> * **russh is not toolchain-free by default.** Its default `aws-lc-rs` backend needs CMake and
+>   NASM and does not build on a stock Windows toolchain; the `ring` backend does. This
+>   contradicts the "pure Rust, no C bindings" claim in
+>   [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md).
+> * **Saved state must not be JSON.** `DockState` holds `egui::Rect`s initialised to infinity,
+>   which JSON cannot represent; RON is required. This is why eframe uses RON internally.
+> * **SSH was testable after all.** Task 2's "no way to verify without a server" assumption was
+>   wrong: russh has a server side, so the client is tested end to end in-process.
+
 - [Summary](#summary)
 - [Where the current design stands](#where-the-current-design-stands)
 - [Recommended ordering](#recommended-ordering)

@@ -40,7 +40,7 @@ impl ConnectionKind {
 /// Note what is *absent*: passwords and key passphrases. Those live only in
 /// [`crate::session::Session`] for the lifetime of the process and are never written here,
 /// because this struct is what plan tasks 4 and 5 will persist to disk.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionSettings {
     pub kind: ConnectionKind,
     pub serial: SerialSettings,
@@ -67,6 +67,38 @@ impl ConnectionSettings {
                     format!("{}@{}", self.ssh.user, self.ssh.host)
                 }
             }
+        }
+    }
+
+    /// Stable key identifying this connection, used to deduplicate the recents list.
+    ///
+    /// Serial includes the line parameters, not just the port name: for a serial tool the baud
+    /// rate and framing are part of what you are trying to remember, so `COM3 @ 9600 8N1` and
+    /// `COM3 @ 115200 8N1` are properly two different things to reopen.
+    ///
+    /// SSH keys on `user@host:port` only. The authentication method is how you get in, not what
+    /// you are connecting to, so switching from a password to a key does not create a duplicate.
+    pub fn identity(&self) -> String {
+        match self.kind {
+            ConnectionKind::Serial => {
+                let s = &self.serial;
+                format!(
+                    "serial:{}@{}:{:?}:{:?}:{:?}:{:?}",
+                    s.name, s.baud_rate, s.data_bits, s.parity, s.stop_bits, s.flow_control
+                )
+            }
+            ConnectionKind::Ssh => format!("ssh:{}", self.ssh.identity()),
+        }
+    }
+
+    /// Longer, human-readable description for the recents list.
+    pub fn description(&self) -> String {
+        match self.kind {
+            ConnectionKind::Serial => {
+                let s = &self.serial;
+                format!("{} · {} baud", s.name, s.baud_rate)
+            }
+            ConnectionKind::Ssh => format!("{} · {}", self.ssh.identity(), self.ssh.auth.label()),
         }
     }
 
@@ -106,7 +138,7 @@ impl SshAuth {
 }
 
 /// Everything needed to open an SSH session, minus the secrets.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshSettings {
     pub host: String,
     pub port: u16,
@@ -116,6 +148,11 @@ pub struct SshSettings {
     pub key_path: Option<PathBuf>,
     /// `TERM` advertised to the remote end.
     pub term: String,
+    /// Host key store to use. `None` means `~/.ssh/known_hosts`.
+    ///
+    /// Overridable so a session can be pointed at a separate store, and so tests can verify
+    /// the trust policy without touching the user's real file.
+    pub known_hosts: Option<PathBuf>,
 }
 
 impl Default for SshSettings {
@@ -128,6 +165,7 @@ impl Default for SshSettings {
             key_path: None,
             // 256-colour is what the emulator actually supports, so claim it.
             term: "xterm-256color".to_owned(),
+            known_hosts: None,
         }
     }
 }
@@ -140,7 +178,7 @@ impl SshSettings {
 }
 
 /// Everything needed to open a serial port.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerialSettings {
     /// Port name, e.g. `COM3` or `/dev/ttyUSB0`.
     pub name: String,
@@ -150,6 +188,11 @@ pub struct SerialSettings {
     pub flow_control: FlowControl,
     pub parity: Parity,
     pub stop_bits: StopBits,
+    /// USB serial number of the device this port belongs to, when known.
+    ///
+    /// Recorded so a replugged adapter can be found again even if the operating system hands
+    /// it a different port number, which Windows routinely does.
+    pub usb_serial: Option<String>,
 }
 
 impl Default for SerialSettings {
@@ -161,6 +204,7 @@ impl Default for SerialSettings {
             flow_control: FlowControl::None,
             parity: Parity::None,
             stop_bits: StopBits::One,
+            usb_serial: None,
         }
     }
 }

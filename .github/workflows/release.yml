@@ -1,0 +1,80 @@
+# Build the Windows installer and attach it to a GitHub release.
+#
+# Triggered by pushing a version tag (`v3.1.0`), or manually from the Actions tab. Tests run
+# first: shipping an installer for code that does not pass its own suite is worse than shipping
+# nothing.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (defaults to the version in Cargo.toml)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    name: Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      # Keyed on Cargo.lock: the dependency tree is large (eframe, wgpu, russh) and a cold build
+      # takes several minutes.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Cached separately from the build: it is a 41 MB download that never changes unless the
+      # pinned version in build.ps1 does.
+      - name: Cache WiX toolset
+        uses: actions/cache@v4
+        with:
+          path: target/installer-tools
+          key: ${{ runner.os }}-wix-${{ hashFiles('installer/build.ps1') }}
+
+      - name: Check
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test --bin UniTerm
+
+      # -PinnedWix ignores the WiX that windows-latest happens to ship, so the artifact does not
+      # depend on the runner image.
+      - name: Build installer
+        run: ./installer/build.ps1 -PinnedWix ${{ inputs.version && format('-Version {0}', inputs.version) || '' }}
+
+      - name: Verify the installer installs, runs and uninstalls
+        run: ./installer/verify.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uniterm-installer
+          path: target/installer/*.msi
+          if-no-files-found: error
+
+      # `gh` is preinstalled on GitHub runners, so no third-party action is needed to publish.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $msi = (Get-Item target/installer/*.msi).FullName
+          gh release upload "${{ github.ref_name }}" $msi --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

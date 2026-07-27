@@ -15,6 +15,17 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
 * **Host keys are verified** against `~/.ssh/known_hosts`, interoperating with OpenSSH. An
   unrecognised host shows its fingerprint and is only trusted if you say so; a host key that
   has *changed* is refused outright, because that is what interception looks like.
+* **Reconnect without losing the terminal.** When a connection drops, one button
+  re-establishes it; everything already on screen stays, and a divider marks where the new
+  session begins. Optional automatic retry backs off between attempts. A replugged USB serial
+  adapter is followed to whatever port number the OS gives it next.
+* **Your layout and tabs come back.** Closing the window saves the dock layout and every tab's
+  settings; the next start restores them. Tabs come back defined but *not* connected unless you
+  tick "On start" for that tab — and even then only when the saved device is really the one
+  attached.
+* **Recent connections.** Anything that has connected successfully is remembered and reopens in
+  one click, from the toolbar menu or from the panel shown when no tabs are open. Entries can be
+  pinned so they are kept and listed first, forgotten individually, or cleared.
 * **Full terminal emulation** in ANSI mode, built on
   [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) — the same core
   Alacritty ships. Cursor addressing, erase, scroll regions, the alternate screen buffer,
@@ -40,16 +51,30 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
 
 ## Install
 
-Download the latest release from [releases](https://github.com/aero530/uniterm/releases).
+Download the `.msi` from [releases](https://github.com/aero530/uniterm/releases) and run it.
+
+It installs **for the current user only**, into `%LOCALAPPDATA%\Programs\UniTerm`, so there is
+**no UAC prompt** — nothing about a serial terminal needs administrative rights. Uninstall from
+Settings > Apps like any other application.
+
+To install without the wizard:
+
+```powershell
+msiexec /i UniTerm-3.0.0-x64.msi /qn
+```
+
+> **Upgrading from 1.x?** The Tauri-era 1.x installer was per-machine and is a different product
+> as far as Windows Installer is concerned, so this package will not replace it — you would end up
+> with both and two Start Menu entries. Uninstall the old UniTerm first.
 
 ## Roadmap
 
-See [PLAN.md](PLAN.md) for the full plan and sizing. In short:
+The six features planned in [PLAN.md](PLAN.md) are all built. What is left from that work:
 
-* A reconnect button that preserves the terminal contents
-* Session and layout persistence across restarts
-* A recent-connections list
 * ssh-agent authentication, and optional credential storage in the OS keychain
+* An embedded font covering CJK and emoji
+* A signed installer (the MSI builds, but releases are unsigned)
+* macOS and Linux packaging — the installer builder is Windows-only
 
 [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md) records why egui was chosen over gpui.
 
@@ -69,8 +94,27 @@ See [PLAN.md](PLAN.md) for the full plan and sizing. In short:
   scrollback in different units (bytes vs lines), so the line limit is derived from the byte
   budget as an estimate.
 * **Passwords and key passphrases are never written to disk.** They live in memory for the
-  life of the process, which also means a reconnect after a restart asks again. Persisting
-  them is only acceptable via the OS keychain, which is not built yet.
+  life of the process, which is what lets a reconnect re-authenticate without asking again —
+  and means a restart does ask. Persisting them is only acceptable via the OS keychain, which
+  is not built yet.
+* **Reconnect divider timestamps are UTC.** `std` cannot convert to local time, and a date
+  library for one line was not worth it, so the zone is labelled rather than guessed.
+* **Automatic retry only applies once a connection has worked.** Retrying something that
+  never connected just repeats a configuration error, so the first attempt is always manual.
+* **Scrollback contents are not saved.** Terminal output routinely contains secrets and can be
+  megabytes; only tab definitions and layout are written.
+* **State is written on close and every 10 seconds.** A crash or a kill loses changes since the
+  last autosave, because `eframe` cannot be asked to save on demand.
+
+### Where state is stored
+
+`%APPDATA%\UniTerm\data\app.ron` on Windows (`~/.local/share/uniterm/` on Linux,
+`~/Library/Application Support/UniTerm/` on macOS). It is a readable RON file holding the dock
+layout, one entry per tab, and the window geometry.
+
+If it cannot be read — corrupted, or written by a newer UniTerm — the app starts with a fresh
+layout, says so in the toolbar, and keeps the unreadable payload under a separate key rather
+than overwriting it. Deleting the file is always safe.
 * **ssh-agent is not supported.** It needs a named-pipe transport on Windows and a separate
   code path; a half-working option would be worse than none.
 * **A server that refuses a PTY yields a line-mode shell rather than an error.** russh does
@@ -109,9 +153,45 @@ cargo build --release
 The executable lands in `target/release/UniTerm.exe`. It is self-contained: the window and
 executable icons are embedded at build time.
 
-> Note: unlike the previous Tauri build, `cargo build` does not produce an installer. If you
-> need MSI/NSIS packaging, add [`cargo-dist`](https://github.com/axodotdev/cargo-dist) or
-> `cargo-wix`.
+### Build the installer
+
+```powershell
+.\installer\build.ps1
+```
+
+Produces `target/installer/UniTerm-<version>-x64.msi`. Then check it actually works:
+
+```powershell
+.\installer\verify.ps1
+```
+
+`verify.ps1` installs the MSI, confirms the files, Start Menu shortcut and registration, launches
+the installed binary, reinstalls to prove upgrades replace rather than duplicate, then uninstalls
+and confirms nothing is left behind. It exits non-zero on the first failure, so it works as a
+release gate — [the release workflow](.github/workflows/release.yml) runs it before publishing.
+
+The WiX toolset is provisioned on first use into `target/installer-tools/`: a pinned copy of the
+official WiX 3.14 archive, verified against a SHA-256 in `build.ps1`. Nothing is installed
+system-wide and no administrator rights are needed. A WiX already on `PATH` or in `$env:WIX` is
+used in preference; `-PinnedWix` forces the pinned copy so release builds do not depend on
+whatever a build machine happens to have. `-NoDownload` refuses to fetch anything.
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `-SkipBuild` | Package `target/release` as-is instead of rebuilding |
+| `-Version 3.1.0` | Override the version from `Cargo.toml` |
+| `-PinnedWix` | Ignore any WiX on the machine; use only the pinned copy |
+| `-NoDownload` | Fail rather than download the toolset |
+| `-CertThumbprint <hash>` | Sign the MSI (needs `signtool.exe` from the Windows SDK) |
+
+Releases are unsigned, so Windows SmartScreen warns on first download. Signing needs a code
+signing certificate; pass `-CertThumbprint` once you have one.
+
+`Cargo.toml` may carry a pre-release version like `3.0.0-dev`. MSI has no concept of a
+pre-release suffix and only compares `major.minor.patch`, so the suffix is dropped for the
+package version and the script says so.
 
 ### Tests and lints
 
@@ -138,6 +218,8 @@ RUST_LOG=uniterm=debug cargo run
 | [src/session/transport.rs](src/session/transport.rs) | Serial and SSH behind one interface |
 | [src/session/ssh.rs](src/session/ssh.rs) | SSH connect, host key policy, auth, PTY |
 | [src/knownhosts.rs](src/knownhosts.rs) | Host key trust store |
+| [src/persist.rs](src/persist.rs) | Saved state: schema, versioning, auto-connect policy |
+| [src/recents.rs](src/recents.rs) | Recent connections: identity, capping, pinning |
 | [src/settings.rs](src/settings.rs) | Connection parameters, display and send modes |
 | [src/discovery.rs](src/discovery.rs) | Serial port enumeration |
 | [src/term/mod.rs](src/term/mod.rs) | The raw byte ring, and why it is the source of truth |
@@ -147,3 +229,6 @@ RUST_LOG=uniterm=debug cargo run
 | [src/term/palette.rs](src/term/palette.rs) | Colour resolution |
 | [src/term/text.rs](src/term/text.rs) | ASCII-view text preparation |
 | [src/ui.rs](src/ui.rs) | Per-tab controls |
+| [installer/uniterm.wxs](installer/uniterm.wxs) | MSI authoring: per-user install, upgrades, shortcut |
+| [installer/build.ps1](installer/build.ps1) | Builds the MSI, provisioning WiX on first use |
+| [installer/verify.ps1](installer/verify.ps1) | Installs, checks, upgrades and uninstalls it |

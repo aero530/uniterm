@@ -97,7 +97,7 @@ pub fn list_ports() -> Vec<PortInfo> {
         })
         .collect();
 
-    out.sort_by(|a, b| natural_port_order(&a.name).cmp(&natural_port_order(&b.name)));
+    out.sort_by_key(|port| natural_port_order(&port.name));
     out
 }
 

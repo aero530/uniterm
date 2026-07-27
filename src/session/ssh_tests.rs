@@ -19,6 +19,7 @@ use russh::{Channel, ChannelId};
 
 use super::ssh::{self, Credentials};
 use crate::knownhosts::{self, Rejection, Trust};
+use crate::session::ConnectionState;
 use crate::settings::{SshAuth, SshSettings};
 
 /// Fixed host key, so tests need no RNG and fingerprints are deterministic.
@@ -141,6 +142,11 @@ impl server::Handler for TestServer {
             .unwrap()
             .received
             .extend_from_slice(data);
+        // "DROP" severs the connection, standing in for a remote host going away.
+        if data.windows(4).any(|w| w == b"DROP") {
+            session.close(channel)?;
+            return Ok(());
+        }
         // Echo it back uppercased, so the client can prove the round trip.
         let echo = bytes::Bytes::from(data.to_ascii_uppercase());
         session.data(channel, echo)?;
@@ -219,6 +225,7 @@ fn password_settings(port: u16) -> SshSettings {
         auth: SshAuth::Password,
         key_path: None,
         term: "xterm-256color".into(),
+        known_hosts: None,
     }
 }
 
@@ -502,6 +509,198 @@ async fn connecting_to_a_closed_port_is_reported_not_hung() {
         Err(ssh::Error::Other(message)) => assert!(message.contains("127.0.0.1:1"), "got {message}"),
         other => panic!("expected a connect error, got {other:?}"),
     }
+    let _ = std::fs::remove_file(&store);
+}
+
+// ---------------------------------------------------------------------------------------
+// Reconnect, driving the real Session against the live server
+// ---------------------------------------------------------------------------------------
+
+/// Everything the whole `Session` needs, pointed at the test server with its key pre-trusted.
+fn ssh_session(port: u16, store: &std::path::Path) -> crate::session::Session {
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), store).unwrap();
+
+    let mut session = crate::session::Session::new(crate::settings::ConnectionSettings {
+        kind: crate::settings::ConnectionKind::Ssh,
+        serial: Default::default(),
+        ssh: SshSettings {
+            known_hosts: Some(store.to_path_buf()),
+            ..password_settings(port)
+        },
+    });
+    session.credentials = creds();
+    session
+}
+
+/// Pump the session until `ready`, or fail. This is what the UI does each frame.
+async fn poll_until(
+    session: &mut crate::session::Session,
+    ctx: &eframe::egui::Context,
+    label: &str,
+    ready: impl Fn(&crate::session::Session) -> bool,
+) {
+    let handle = tokio::runtime::Handle::current();
+    for _ in 0..600 {
+        session.poll(&handle, ctx);
+        if ready(session) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "timed out waiting for {label}; state={:?} error={:?}",
+        session.state, session.last_error
+    );
+}
+
+fn buffer_text(session: &crate::session::Session) -> String {
+    let buffer = session.buffer.lock().unwrap();
+    (0..buffer.line_count())
+        .filter_map(|i| buffer.line(i))
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn a_dropped_connection_can_be_reconnected_and_keeps_the_terminal() {
+    // The headline requirement, end to end against a real server: the remote host goes away,
+    // the button re-establishes the session, and nothing already on screen is lost.
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("reconnect_e2e");
+    let ctx = eframe::egui::Context::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut session = ssh_session(port, &store);
+
+    session.connect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the first connection", |s| s.is_connected()).await;
+    poll_until(&mut session, &ctx, "the greeting", |s| {
+        buffer_text(s).contains("welcome")
+    })
+    .await;
+    assert!(!session.has_connected() || session.state == ConnectionState::Connected);
+
+    // Make the server sever the connection.
+    session.send(b"DROP\n".to_vec());
+    poll_until(&mut session, &ctx, "the drop to be noticed", |s| {
+        s.state == ConnectionState::Disconnected
+    })
+    .await;
+    assert!(
+        session.last_error.is_some(),
+        "an unexpected drop must be reported"
+    );
+    assert!(
+        buffer_text(&session).contains("welcome"),
+        "the drop must not clear the terminal"
+    );
+    assert!(session.can_connect(), "the button must be usable again");
+
+    // Reconnect.
+    session.reconnect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the reconnection", |s| s.is_connected()).await;
+    poll_until(&mut session, &ctx, "the second greeting", |s| {
+        buffer_text(s).matches("welcome").count() >= 2
+    })
+    .await;
+
+    let text = buffer_text(&session);
+    assert!(
+        text.contains("reconnected #1"),
+        "the seam must be marked; got:\n{text}"
+    );
+    assert_eq!(
+        text.matches("welcome").count(),
+        2,
+        "both sessions' output should be present; got:\n{text}"
+    );
+
+    session.disconnect();
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn reconnecting_twice_in_a_row_works() {
+    // "Reset the button state so the user can try to reconnect multiple times."
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("reconnect_twice");
+    let ctx = eframe::egui::Context::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut session = ssh_session(port, &store);
+
+    session.connect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the first connection", |s| s.is_connected()).await;
+
+    for expected in 1..=3 {
+        session.send(b"DROP\n".to_vec());
+        poll_until(&mut session, &ctx, "a drop", |s| {
+            s.state == ConnectionState::Disconnected
+        })
+        .await;
+        session.reconnect(&handle, &ctx);
+        poll_until(&mut session, &ctx, "a reconnection", |s| s.is_connected()).await;
+        poll_until(&mut session, &ctx, "the divider", |s| {
+            buffer_text(s).contains(&format!("reconnected #{expected}"))
+        })
+        .await;
+    }
+
+    session.disconnect();
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn a_reconnect_that_fails_leaves_the_button_usable() {
+    // The server is gone for good; the attempt must fail cleanly and stay retryable rather
+    // than wedging in Reconnecting.
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("reconnect_fail");
+    let ctx = eframe::egui::Context::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut session = ssh_session(port, &store);
+
+    session.connect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the first connection", |s| s.is_connected()).await;
+    session.disconnect();
+
+    // Point at a dead port so every attempt fails.
+    session.settings.ssh.port = 1;
+    for _ in 0..3 {
+        session.reconnect(&handle, &ctx);
+        poll_until(&mut session, &ctx, "the failure", |s| {
+            s.state == ConnectionState::Disconnected && s.last_error.is_some()
+        })
+        .await;
+        assert!(
+            session.can_connect(),
+            "a failed reconnect must re-enable the button"
+        );
+    }
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn auto_reconnect_recovers_without_being_asked() {
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("auto_reconnect");
+    let ctx = eframe::egui::Context::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut session = ssh_session(port, &store);
+    session.auto_reconnect = true;
+
+    session.connect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the first connection", |s| s.is_connected()).await;
+
+    session.send(b"DROP\n".to_vec());
+    // No manual reconnect: polling alone should bring it back once the backoff elapses.
+    poll_until(&mut session, &ctx, "automatic recovery", |s| {
+        buffer_text(s).contains("reconnected #1")
+    })
+    .await;
+    assert!(session.is_connected());
+
+    session.disconnect();
     let _ = std::fs::remove_file(&store);
 }
 

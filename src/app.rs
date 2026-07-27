@@ -17,6 +17,8 @@ use egui_dock::{DockArea, DockState, NodePath, TabViewer};
 use tokio::runtime::Handle;
 
 use crate::discovery::{self, PortInfo};
+use crate::persist;
+use crate::recents::{self, Recents};
 use crate::session::Session;
 use crate::settings::ConnectionSettings;
 use crate::term::{input, render};
@@ -38,10 +40,18 @@ pub struct UniTermApp {
     ports: Vec<PortInfo>,
     next_id: u64,
     rt: Handle,
+    /// A saved payload that could not be read. Held so the next save sets it aside rather than
+    /// overwriting it, and so the user can be told once.
+    unreadable_state: Option<String>,
+    /// Message about the restore, shown in the toolbar until dismissed.
+    restore_notice: Option<String>,
+    /// Connections that have worked before, offered for one-click reopening.
+    recents: Recents,
 }
 
 impl UniTermApp {
-    pub fn new(rt: Handle) -> Self {
+    /// Build the app, restoring saved state when there is any.
+    pub fn new(rt: Handle, storage: Option<&dyn eframe::Storage>, ctx: &egui::Context) -> Self {
         let ports = discovery::list_ports();
         let mut app = Self {
             dock: DockState::new(Vec::new()),
@@ -49,11 +59,121 @@ impl UniTermApp {
             ports,
             next_id: 0,
             rt,
+            unreadable_state: None,
+            restore_notice: None,
+            recents: Recents::default(),
         };
-        // Open one tab so the window is not empty on first run.
-        let id = app.new_session();
-        app.dock = DockState::new(vec![id]);
+
+        match storage.map(persist::load) {
+            Some(persist::Loaded::Restored(state)) => app.restore(*state, ctx),
+            Some(persist::Loaded::Unreadable { reason, payload }) => {
+                app.unreadable_state = Some(payload);
+                app.restore_notice = Some(reason);
+                app.start_fresh();
+            }
+            Some(persist::Loaded::Fresh) | None => app.start_fresh(),
+        }
         app
+    }
+
+    /// One empty tab, so the window is never blank.
+    fn start_fresh(&mut self) {
+        let id = self.new_session();
+        self.dock = DockState::new(vec![id]);
+    }
+
+    /// Rebuild tabs and layout from saved state.
+    ///
+    /// The dock and the session map are stored separately, so they are reconciled rather than
+    /// trusted: a layout referring to a tab with no definition would otherwise render as a dead
+    /// "(closed)" pane forever.
+    fn restore(&mut self, state: persist::PersistedState, ctx: &egui::Context) {
+        let mut skipped = Vec::new();
+        self.recents = Recents::from_entries(state.recents);
+
+        for tab in state.tabs {
+            let id = tab.id;
+            let mut session = Session::new(tab.settings.clone());
+            session.display_mode = tab.display_mode;
+            session.set_max_bytes(tab.max_bytes);
+            session.font_size = tab.font_size;
+            session.enter_crlf = tab.enter_crlf;
+            session.auto_reconnect = tab.auto_reconnect;
+            session.auto_connect = tab.auto_connect;
+            session.send_mode = tab.send_mode;
+            session.append_cr = tab.append_cr;
+            session.append_lf = tab.append_lf;
+            session.log_path = tab.log_path;
+            session.log_enabled = tab.log_enabled;
+
+            // Dial only what the user opted in for, and only when it is safe to.
+            if tab.auto_connect {
+                match persist::may_auto_connect(&tab.settings, &self.ports) {
+                    persist::AutoConnect::Yes => session.connect(&self.rt, ctx),
+                    persist::AutoConnect::No(reason) => {
+                        session.last_error = Some(reason.clone());
+                        skipped.push(format!("{}: {reason}", tab.settings.label()));
+                    }
+                }
+            }
+
+            self.sessions.insert(id, session);
+            self.next_id = self.next_id.max(id.0 + 1);
+        }
+        self.next_id = self.next_id.max(state.next_id);
+
+        // Drop layout entries with no matching definition.
+        self.dock = state.dock;
+        let known: Vec<TabId> = self.sessions.keys().copied().collect();
+        self.dock.retain_tabs(|tab| known.contains(tab));
+
+        // Any definition the layout lost track of would be invisible; re-attach it.
+        let placed: Vec<TabId> = self.dock.iter_all_tabs().map(|(_, id)| *id).collect();
+        for id in known {
+            if !placed.contains(&id) {
+                self.dock.push_to_focused_leaf(id);
+            }
+        }
+        if self.dock.iter_all_tabs().next().is_none() {
+            self.start_fresh();
+        }
+
+        if !skipped.is_empty() {
+            self.restore_notice = Some(format!(
+                "{} tab(s) were not connected automatically. {}",
+                skipped.len(),
+                skipped.join(" · ")
+            ));
+        }
+    }
+
+    /// Snapshot for saving.
+    fn snapshot(&self) -> persist::PersistedState {
+        persist::PersistedState {
+            version: persist::SCHEMA_VERSION,
+            next_id: self.next_id,
+            dock: self.dock.clone(),
+            tabs: self
+                .sessions
+                .iter()
+                .map(|(id, session)| persist::PersistedTab {
+                    id: *id,
+                    settings: session.settings.clone(),
+                    display_mode: session.display_mode,
+                    max_bytes: session.max_bytes,
+                    font_size: session.font_size,
+                    enter_crlf: session.enter_crlf,
+                    auto_reconnect: session.auto_reconnect,
+                    auto_connect: session.auto_connect,
+                    send_mode: session.send_mode,
+                    append_cr: session.append_cr,
+                    append_lf: session.append_lf,
+                    log_path: session.log_path.clone(),
+                    log_enabled: session.log_enabled,
+                })
+                .collect(),
+            recents: self.recents.entries().to_vec(),
+        }
     }
 
     /// Create a session pre-filled with the first available port, matching the old
@@ -73,6 +193,163 @@ impl UniTermApp {
 
     fn refresh_ports(&mut self) {
         self.ports = discovery::list_ports();
+    }
+
+    /// Open a tab for a remembered connection.
+    ///
+    /// Connecting reuses the same policy as startup auto-connect, so a serial device that is not
+    /// attached, a port that now holds different hardware, or an SSH tab whose password was never
+    /// saved opens ready-to-go with the reason shown rather than failing.
+    fn open_recent(&mut self, settings: ConnectionSettings, ctx: &egui::Context) {
+        let id = TabId(self.next_id);
+        self.next_id += 1;
+
+        let mut session = Session::new(settings.clone());
+        match persist::may_auto_connect(&settings, &self.ports) {
+            persist::AutoConnect::Yes => session.connect(&self.rt, ctx),
+            persist::AutoConnect::No(reason) => session.last_error = Some(reason),
+        }
+        self.sessions.insert(id, session);
+        self.dock.push_to_focused_leaf(id);
+    }
+
+    /// Menu listing remembered connections.
+    fn recents_menu(&mut self, ui: &mut Ui) {
+        let mut to_open = None;
+        let mut to_pin = None;
+        let mut to_remove = None;
+        let mut clear = false;
+        let now = recents::now_seconds();
+
+        let label = if self.recents.is_empty() {
+            "Recent ▾".to_owned()
+        } else {
+            format!("Recent ({}) ▾", self.recents.len())
+        };
+        ui.menu_button(label, |ui| {
+            if self.recents.is_empty() {
+                ui.label("Nothing yet.");
+                ui.weak("Connections appear here once they have worked.");
+                return;
+            }
+            ui.set_min_width(320.0);
+            for entry in self.recents.entries() {
+                let identity = entry.identity();
+                ui.horizontal(|ui| {
+                    let pin = if entry.pinned { "★" } else { "☆" };
+                    if ui
+                        .small_button(pin)
+                        .on_hover_text("Pin so it is kept and listed first")
+                        .clicked()
+                    {
+                        to_pin = Some(identity.clone());
+                    }
+                    if ui
+                        .button(entry.settings.description())
+                        .on_hover_text(format!(
+                            "Last used {} · opened {} time(s)",
+                            recents::relative_time(now, entry.last_used),
+                            entry.uses
+                        ))
+                        .clicked()
+                    {
+                        to_open = Some(entry.settings.clone());
+                        ui.close();
+                    }
+                    ui.weak(recents::relative_time(now, entry.last_used));
+                    if ui.small_button("✖").on_hover_text("Forget this one").clicked() {
+                        to_remove = Some(identity.clone());
+                    }
+                });
+            }
+            ui.separator();
+            if ui
+                .button("Clear history")
+                .on_hover_text("Forget everything except pinned entries")
+                .clicked()
+            {
+                clear = true;
+                ui.close();
+            }
+        });
+
+        if let Some(identity) = to_pin {
+            self.recents.toggle_pin(&identity);
+        }
+        if let Some(identity) = to_remove {
+            self.recents.remove(&identity);
+        }
+        if clear {
+            self.recents.clear_unpinned();
+        }
+        if let Some(settings) = to_open {
+            let ctx = ui.ctx().clone();
+            self.open_recent(settings, &ctx);
+        }
+    }
+
+    /// Shown in place of the dock when every tab has been closed.
+    ///
+    /// This is where the recents list earns its keep: a menu tucked into the toolbar mostly does
+    /// not get found, whereas an empty window is exactly the moment someone wants to reopen
+    /// something.
+    fn launcher(&mut self, ui: &mut Ui) {
+        let mut to_open = None;
+        let mut new_tab = false;
+        let now = recents::now_seconds();
+
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+            // Fill the pane, or the frame's background stops at its content and leaves a seam
+            // against the darker area behind it.
+            ui.set_min_size(ui.available_size());
+            ui.vertical_centered(|ui| {
+                ui.add_space(48.0);
+                ui.heading("No open connections");
+                ui.add_space(4.0);
+                if ui.button("＋  New connection").clicked() {
+                    new_tab = true;
+                }
+                ui.add_space(24.0);
+
+                if self.recents.is_empty() {
+                    ui.weak("Connections you use will be listed here for one-click reopening.");
+                    return;
+                }
+
+                ui.label("Recent connections");
+                ui.add_space(6.0);
+                // Bounded so a long history cannot push the button off-screen.
+                for entry in self.recents.entries().iter().take(10) {
+                    ui.horizontal(|ui| {
+                        // Clamped at zero: a narrow pane would otherwise ask for negative
+                        // padding to centre a row wider than the space available.
+                        ui.add_space((ui.available_width() / 2.0 - 190.0).max(0.0));
+                        if entry.pinned {
+                            ui.label("★");
+                        }
+                        if ui
+                            .add_sized(
+                                [260.0, 24.0],
+                                egui::Button::new(entry.settings.description()),
+                            )
+                            .clicked()
+                        {
+                            to_open = Some(entry.settings.clone());
+                        }
+                        ui.weak(recents::relative_time(now, entry.last_used));
+                    });
+                }
+            });
+        });
+
+        if new_tab {
+            let id = self.new_session();
+            self.dock.push_to_focused_leaf(id);
+        }
+        if let Some(settings) = to_open {
+            let ctx = ui.ctx().clone();
+            self.open_recent(settings, &ctx);
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -96,6 +373,8 @@ impl UniTermApp {
                     self.dock.push_to_focused_leaf(id);
                 }
 
+                self.recents_menu(ui);
+
                 ui.separator();
                 ui.label(format!("{} port(s)", self.ports.len()));
 
@@ -117,14 +396,43 @@ impl UniTermApp {
 }
 
 impl eframe::App for UniTermApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        persist::save(storage, &self.snapshot(), self.unreadable_state.as_deref());
+        // Written once; keep the live payload valid from here on.
+        self.unreadable_state = None;
+    }
+
+    /// How often state is written while running.
+    ///
+    /// Shorter than eframe's 30 second default because everything worth saving here is cheap to
+    /// serialise, and the window between a change and a crash is what gets lost.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(10)
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // Drain each session's task messages before drawing, so button states and any
         // errors reflect this frame.
+        let now = recents::now_seconds();
+        let mut established = Vec::new();
         for session in self.sessions.values_mut() {
-            session.poll();
+            if session.poll(&self.rt, ui.ctx()) {
+                established.push(session.settings.clone());
+            }
+        }
+        // Only connections that actually worked are worth remembering.
+        for settings in established {
+            self.recents.record(&settings, now);
         }
 
         self.toolbar(ui);
+
+        // With no tabs there is nothing for the dock to draw, and an empty window is exactly
+        // when someone wants to reopen something.
+        if self.dock.iter_all_tabs().next().is_none() {
+            self.launcher(ui);
+            return;
+        }
 
         let mut closed = Vec::new();
         let mut added = Vec::new();

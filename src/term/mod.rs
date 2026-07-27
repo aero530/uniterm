@@ -43,8 +43,15 @@ pub struct TermBuffer {
     lines: Vec<u64>,
     /// Bumped on every mutation so views can invalidate caches.
     revision: u64,
-    /// Total bytes ever received.
-    total_received: u64,
+    /// Length of the whole stream, including bytes already trimmed away.
+    ///
+    /// `discarded + bytes.len()` always equals this, which is what lets [`Self::slice_from`]
+    /// address the stream by absolute offset.
+    stream_len: u64,
+    /// Bytes that actually came from the device, for the status readout.
+    ///
+    /// Lower than [`Self::stream_len`] when markers have been injected locally.
+    device_bytes: u64,
 }
 
 impl Default for TermBuffer {
@@ -61,12 +68,14 @@ impl TermBuffer {
             max_bytes: max_bytes.clamp(MIN_MAX_BYTES, MAX_MAX_BYTES),
             lines: vec![0],
             revision: 0,
-            total_received: 0,
+            stream_len: 0,
+            device_bytes: 0,
         }
     }
 
+    /// Bytes received from the device.
     pub fn total_received(&self) -> u64 {
-        self.total_received
+        self.device_bytes
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -97,12 +106,26 @@ impl TermBuffer {
         self.revision += 1;
     }
 
-    /// Append newly received bytes.
+    /// Append bytes received from the device.
     pub fn append(&mut self, data: &[u8]) {
+        self.device_bytes += data.len() as u64;
+        self.push(data);
+    }
+
+    /// Append bytes the application generated itself, such as a reconnect divider.
+    ///
+    /// These flow into every view and survive a display-mode replay, because they live in the
+    /// ring like anything else. What they do *not* do is reach the log file — the logger only
+    /// sees what the transport returned — or count towards the received-bytes readout.
+    pub fn append_local(&mut self, data: &[u8]) {
+        self.push(data);
+    }
+
+    fn push(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
-        self.total_received += data.len() as u64;
+        self.stream_len += data.len() as u64;
 
         let scan_from = self.bytes.len();
         self.bytes.extend_from_slice(data);
@@ -185,8 +208,8 @@ impl TermBuffer {
     /// requested when the ring has already trimmed past it. Feeding the emulator uses this,
     /// so a UI stall during a flood degrades to a reported gap rather than silent corruption.
     pub fn slice_from(&self, from: u64) -> (&[u8], u64) {
-        if from >= self.total_received {
-            return (&[], self.total_received);
+        if from >= self.stream_len {
+            return (&[], self.stream_len);
         }
         let start = from.max(self.discarded);
         (&self.bytes[self.rel(start)..], start)
@@ -321,6 +344,27 @@ mod tests {
     }
 
     #[test]
+    fn local_appends_are_visible_but_not_counted_as_received() {
+        // A reconnect divider must show up in the views and reach the emulator, without
+        // inflating the received-bytes readout.
+        let mut buf = TermBuffer::new(10_000);
+        buf.append(b"device
+");
+        let received = buf.total_received();
+        buf.append_local(b"-- marker --
+");
+
+        assert_eq!(buf.total_received(), received, "markers are not device bytes");
+        assert_eq!(line_text(&buf, 1), "-- marker --", "but they are in the ring");
+        // The stream invariant still holds, so slice_from can address the marker.
+        assert_eq!(buf.discarded + buf.retained_bytes() as u64, buf.stream_len);
+        let (slice, at) = buf.slice_from(received);
+        assert_eq!(at, received);
+        assert_eq!(slice, b"-- marker --
+");
+    }
+
+    #[test]
     fn slice_from_returns_the_unfed_tail() {
         let mut buf = TermBuffer::new(10_000);
         buf.append(b"hello");
@@ -356,7 +400,7 @@ mod tests {
         let (slice, at) = buf.slice_from(0);
         assert!(at > 0, "must report that early bytes were dropped");
         assert_eq!(slice.len(), buf.retained_bytes());
-        assert_eq!(at + slice.len() as u64, buf.total_received());
+        assert_eq!(at + slice.len() as u64, buf.stream_len);
     }
 
     #[test]
@@ -373,6 +417,6 @@ mod tests {
             fed += slice.len() as u64;
         }
         assert_eq!(seen, buf.bytes());
-        assert_eq!(fed, buf.total_received());
+        assert_eq!(fed, buf.stream_len);
     }
 }

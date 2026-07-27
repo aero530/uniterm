@@ -9,6 +9,8 @@
 mod app;
 mod discovery;
 mod knownhosts;
+mod persist;
+mod recents;
 mod session;
 mod settings;
 mod term;
@@ -63,7 +65,11 @@ fn main() -> eframe::Result {
             cc.egui_ctx.all_styles_mut(|style| {
                 style.visuals.window_corner_radius = 4.0.into();
             });
-            Ok(Box::new(app::UniTermApp::new(handle)))
+            Ok(Box::new(app::UniTermApp::new(
+                handle,
+                cc.storage,
+                &cc.egui_ctx,
+            )))
         }),
     )
 }

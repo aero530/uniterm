@@ -22,7 +22,7 @@ pub mod transport;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use tokio::runtime::Handle;
@@ -57,22 +57,53 @@ enum Event {
     Closed { reason: Option<String> },
     /// The host key was refused. Carries what to show the user.
     HostKey(Rejection),
+    /// The serial device reappeared under a different port name.
+    PortChanged(String),
     /// Non-fatal problem, e.g. the log file could not be written.
     Warning(String),
 }
 
+/// Current time as `HH:MM:SS UTC`.
+///
+/// UTC rather than local time because `std` cannot convert to local time, and a whole date
+/// library for one divider line is not worth it. Labelling it beats quietly showing the wrong
+/// zone.
+fn utc_hms() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
 /// Connection lifecycle.
 ///
-/// The Tauri build tracked this as two loosely-related booleans (`is_active`, `is_running`).
-/// A single enum makes the button states unambiguous and gives plan task 3 somewhere to add
-/// `Reconnecting`.
+/// The Tauri build tracked this as two loosely-related booleans (`is_active`, `is_running`),
+/// which made it impossible to tell "never connected" from "dropped".
+///
+/// There is deliberately no `Failed` state: a failed attempt returns to `Disconnected` with
+/// `last_error` set, which is exactly what re-enables the button so the user can try again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConnectionState {
     #[default]
     Disconnected,
     Connecting,
+    /// A reconnect is in flight. Distinct from `Connecting` only so the button can say so.
+    Reconnecting,
     Connected,
 }
+
+/// Delay before each successive automatic retry, in seconds.
+///
+/// Backing off matters because the common cause of a drop — a host rebooting, a link
+/// flapping — takes longer than one second to clear, and hammering it helps nobody.
+const RETRY_BACKOFF_SECONDS: &[u64] = &[1, 2, 5, 10, 20, 30];
 
 /// One terminal tab: its settings, its scrollback, and its transport if connected.
 pub struct Session {
@@ -83,6 +114,24 @@ pub struct Session {
     pub last_error: Option<String>,
     /// A host key awaiting the user's decision.
     pub pending_host_key: Option<Rejection>,
+
+    /// Whether this session has ever been connected.
+    ///
+    /// Drives the Connect/Reconnect label, and gates automatic retries: retrying a connection
+    /// that never worked in the first place would just repeat a configuration error.
+    has_connected: bool,
+    /// How many times this session has reconnected, shown on the divider.
+    reconnect_count: u32,
+    /// Connect this tab automatically on startup. Off by default; the decision is guarded by
+    /// [`crate::persist::may_auto_connect`].
+    pub auto_connect: bool,
+    /// Retry automatically after an unexpected drop. Off by default — a reconnect can be a
+    /// visible action on the remote host, so it should be the user's choice.
+    pub auto_reconnect: bool,
+    /// When the next automatic retry is due.
+    retry_at: Option<Instant>,
+    /// Index into [`RETRY_BACKOFF_SECONDS`] for the next automatic retry.
+    retry_attempt: usize,
 
     /// Secrets, held in memory only and never persisted.
     pub credentials: ssh::Credentials,
@@ -127,6 +176,12 @@ impl Session {
             state: ConnectionState::Disconnected,
             last_error: None,
             pending_host_key: None,
+            has_connected: false,
+            reconnect_count: 0,
+            auto_connect: false,
+            auto_reconnect: false,
+            retry_at: None,
+            retry_attempt: 0,
             credentials: ssh::Credentials::default(),
             buffer: Arc::new(Mutex::new(TermBuffer::new(DEFAULT_MAX_BYTES))),
             max_bytes: DEFAULT_MAX_BYTES,
@@ -151,7 +206,7 @@ impl Session {
         let name = self.settings.label();
         match self.state {
             ConnectionState::Connected => format!("● {name}"),
-            ConnectionState::Connecting => format!("◌ {name}"),
+            ConnectionState::Connecting | ConnectionState::Reconnecting => format!("◌ {name}"),
             ConnectionState::Disconnected => name,
         }
     }
@@ -160,15 +215,53 @@ impl Session {
         self.state == ConnectionState::Connected
     }
 
+    /// Whether a connection exists or is being established.
+    ///
+    /// Includes `Reconnecting`, which is what makes the reconnect button idempotent: a second
+    /// press, an Enter-key repeat or an automatic retry firing mid-attempt is a no-op rather
+    /// than a second session.
     pub fn is_busy(&self) -> bool {
         matches!(
             self.state,
-            ConnectionState::Connecting | ConnectionState::Connected
+            ConnectionState::Connecting | ConnectionState::Reconnecting | ConnectionState::Connected
         )
+    }
+
+    /// Whether the user can ask for a (re)connection right now.
+    pub fn can_connect(&self) -> bool {
+        !self.is_busy() && self.pending_host_key.is_none()
+    }
+
+    /// Whether this session has been connected before, so the button reads "Reconnect".
+    pub fn has_connected(&self) -> bool {
+        self.has_connected
+    }
+
+    /// How long until the next automatic retry, if one is scheduled.
+    pub fn retry_countdown(&self) -> Option<Duration> {
+        self.retry_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
     /// Start the session task.
     pub fn connect(&mut self, rt: &Handle, ctx: &egui::Context) {
+        // An explicit press clears any pending automatic retry, and starts the backoff over.
+        self.retry_at = None;
+        self.retry_attempt = 0;
+        self.connect_inner(rt, ctx, None);
+    }
+
+    /// Re-establish a connection that dropped, keeping the terminal contents.
+    ///
+    /// Idempotent: while an attempt is in flight [`Self::connect_inner`] refuses, so a second
+    /// press cannot open a second session. A failure returns the state to `Disconnected`, which
+    /// re-enables the button so the user can try as often as they like.
+    pub fn reconnect(&mut self, rt: &Handle, ctx: &egui::Context) {
+        if !self.can_connect() {
+            return;
+        }
+        self.retry_at = None;
+        self.retry_attempt = 0;
         self.connect_inner(rt, ctx, None);
     }
 
@@ -244,10 +337,61 @@ impl Session {
 
         self.commands = Some(cmd_tx);
         self.events = Some(evt_rx);
-        self.state = ConnectionState::Connecting;
+        self.state = if self.has_connected {
+            ConnectionState::Reconnecting
+        } else {
+            ConnectionState::Connecting
+        };
         self.last_error = None;
         self.pending_host_key = None;
         self.sent_size = None;
+    }
+
+    /// Bytes marking the seam between one connection and the next.
+    ///
+    /// The remote end's screen state died with the connection, so the new session must not
+    /// inherit the old cursor position, colours, scroll region or alternate-screen flag. This
+    /// resets all of those *without* clearing the screen, so the scrollback above stays exactly
+    /// as it was — which is the whole point of the feature.
+    ///
+    /// It is injected into the ring rather than special-cased in the renderer, so it shows up in
+    /// every display mode and survives a mode-switch replay. It never reaches the log file,
+    /// because the logger only sees what the transport returned.
+    fn reconnect_divider(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Leave the alternate screen, drop any scroll region, soft-reset modes, clear
+        // attributes, then start on a fresh line.
+        out.extend_from_slice(b"\x1b[?1049l\x1b[r\x1b[!p\x1b[0m\r\n");
+        out.extend_from_slice(
+            format!(
+                "\u{2500}\u{2500} reconnected #{} at {} \u{2500}\u{2500}\r\n",
+                self.reconnect_count,
+                utc_hms()
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// Write the divider into the ring.
+    fn mark_reconnected(&mut self) {
+        let divider = self.reconnect_divider();
+        if let Ok(mut buffer) = self.buffer.lock() {
+            buffer.append_local(&divider);
+        }
+    }
+
+    /// Schedule an automatic retry, if enabled.
+    fn schedule_retry(&mut self) {
+        if !self.auto_reconnect || !self.has_connected {
+            return;
+        }
+        let seconds = RETRY_BACKOFF_SECONDS
+            .get(self.retry_attempt)
+            .copied()
+            .unwrap_or_else(|| *RETRY_BACKOFF_SECONDS.last().unwrap_or(&30));
+        self.retry_attempt = (self.retry_attempt + 1).min(RETRY_BACKOFF_SECONDS.len());
+        self.retry_at = Some(Instant::now() + Duration::from_secs(seconds));
     }
 
     /// Ask the session task to stop.
@@ -259,37 +403,83 @@ impl Session {
         self.state = ConnectionState::Disconnected;
     }
 
-    /// Drain task messages. Called once per frame.
-    pub fn poll(&mut self) {
-        let Some(events) = self.events.as_mut() else {
-            return;
-        };
-        while let Ok(event) = events.try_recv() {
-            match event {
-                Event::Connected => self.state = ConnectionState::Connected,
-                Event::Closed { reason } => {
-                    self.state = ConnectionState::Disconnected;
-                    self.commands = None;
-                    if reason.is_some() {
-                        self.last_error = reason;
+    /// Drain task messages and fire any due automatic retry. Called once per frame.
+    ///
+    /// Returns whether a connection was established this frame, so the caller can record it in
+    /// the recents list. Only successes are worth remembering — a list of connections that never
+    /// worked would just offer to repeat the user's typos.
+    pub fn poll(&mut self, rt: &Handle, ctx: &egui::Context) -> bool {
+        let mut connected = false;
+        let mut dropped = false;
+
+        if let Some(events) = self.events.as_mut() {
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    Event::Connected => {
+                        self.state = ConnectionState::Connected;
+                        connected = true;
                     }
-                }
-                Event::HostKey(rejection) => {
-                    self.state = ConnectionState::Disconnected;
-                    self.commands = None;
-                    if rejection.is_promptable() {
-                        self.pending_host_key = Some(rejection);
-                    } else {
-                        // A changed key is never promptable; show it as an error instead.
-                        self.last_error = Some(rejection.message());
+                    Event::Closed { reason } => {
+                        self.state = ConnectionState::Disconnected;
+                        self.commands = None;
+                        // `None` is a clean, user-requested close: not a drop, and not
+                        // something to retry.
+                        if reason.is_some() {
+                            self.last_error = reason;
+                            dropped = true;
+                        }
                     }
+                    Event::HostKey(rejection) => {
+                        self.state = ConnectionState::Disconnected;
+                        self.commands = None;
+                        if rejection.is_promptable() {
+                            self.pending_host_key = Some(rejection);
+                        } else {
+                            // A changed key is never promptable; show it as an error instead.
+                            self.last_error = Some(rejection.message());
+                        }
+                    }
+                    Event::PortChanged(name) => {
+                        // The device came back on a different port; follow it.
+                        self.settings.serial.name = name;
+                    }
+                    Event::Warning(message) => self.last_error = Some(message),
                 }
-                Event::Warning(message) => self.last_error = Some(message),
             }
+        }
+
+        if connected {
+            // Mark the seam only for a genuine reconnection, not the first connection.
+            if self.has_connected {
+                self.reconnect_count += 1;
+                self.mark_reconnected();
+            }
+            self.has_connected = true;
+            self.retry_attempt = 0;
+            self.retry_at = None;
+        }
+        if dropped {
+            self.schedule_retry();
         }
         if self.commands.is_none() && self.state == ConnectionState::Disconnected {
             self.events = None;
         }
+
+        // Drive the retry timer. egui only repaints on demand, so a wake-up has to be asked
+        // for or a scheduled retry would wait for unrelated input.
+        if let Some(at) = self.retry_at {
+            let remaining = at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.retry_at = None;
+                if self.can_connect() {
+                    self.connect_inner(rt, ctx, None);
+                }
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+
+        connected
     }
 
     /// Transmit bytes, if connected.
@@ -439,6 +629,32 @@ impl Session {
     }
 }
 
+/// Find the port to open, following the device if it moved.
+///
+/// Returns the port name to use, or `None` to keep the recorded one. Enumeration is blocking, so
+/// it runs off the async worker.
+async fn resolve_serial_port(settings: &crate::settings::SerialSettings) -> Option<String> {
+    let usb_serial = settings.usb_serial.clone()?;
+    if usb_serial.is_empty() {
+        return None;
+    }
+    let name = settings.name.clone();
+    tokio::task::spawn_blocking(move || {
+        let ports = crate::discovery::list_ports();
+        // The recorded name is still there: prefer it and change nothing.
+        if ports.iter().any(|p| p.name == name) {
+            return None;
+        }
+        ports
+            .into_iter()
+            .find(|p| p.serial_number == usb_serial)
+            .map(|p| p.name)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// The session task: open the transport, then pump it until told to stop.
 #[allow(clippy::too_many_arguments)]
 async fn run(
@@ -456,9 +672,32 @@ async fn run(
 
     // ---- open ----
     let transport = match settings.kind {
-        ConnectionKind::Serial => transport::open_serial(&settings.serial).map_err(|e| (e, None)),
+        ConnectionKind::Serial => {
+            // A USB adapter that was unplugged and replugged can come back on a different port
+            // number — Windows in particular does not guarantee COM numbering — so the device
+            // is re-found by its USB serial number before giving up on the recorded name.
+            let mut serial = settings.serial.clone();
+            if let Some(found) = resolve_serial_port(&serial).await {
+                if found != serial.name {
+                    let _ = events.send(Event::Warning(format!(
+                        "{} is gone; reconnected on {} (same device serial {}).",
+                        serial.name,
+                        found,
+                        serial.usb_serial.as_deref().unwrap_or("?")
+                    )));
+                    let _ = events.send(Event::PortChanged(found.clone()));
+                    serial.name = found;
+                }
+            }
+            transport::open_serial(&serial).map_err(|e| (e, None))
+        }
         ConnectionKind::Ssh => {
-            let known_hosts = match knownhosts::default_path() {
+            let known_hosts = match settings
+                .ssh
+                .known_hosts
+                .clone()
+                .or_else(knownhosts::default_path)
+            {
                 Some(path) => path,
                 None => {
                     let _ = events.send(Event::Closed {
@@ -694,12 +933,18 @@ mod tests {
     }
 
     #[test]
-    fn credentials_are_not_part_of_persisted_settings() {
-        // A compile-time-ish guard: settings must serialize without secrets in them.
-        let session = ssh_session();
-        let json = serde_json::to_string(&session.settings).unwrap_or_default();
-        assert!(!json.contains("password"));
-        assert!(!json.contains("passphrase"));
+    fn credentials_never_reach_the_serialised_settings() {
+        // Structurally they cannot — `ConnectionSettings` has no field for them — but assert it
+        // against distinctive sentinel values so a future refactor that "helpfully" moves
+        // credentials into settings fails loudly here.
+        let mut session = ssh_session();
+        session.credentials = ssh::Credentials {
+            password: "sentinel-pw-9c3f".into(),
+            passphrase: "sentinel-pp-4a71".into(),
+        };
+        let encoded = serde_json::to_string(&session.settings).expect("settings serialise");
+        assert!(!encoded.contains("sentinel-pw-9c3f"), "password leaked: {encoded}");
+        assert!(!encoded.contains("sentinel-pp-4a71"), "passphrase leaked: {encoded}");
     }
 
     #[test]
@@ -768,6 +1013,351 @@ mod tests {
         session.push_size();
         assert!(rx.try_recv().is_err());
         assert_eq!(session.sent_size, first);
+    }
+
+    // ---- reconnect ----
+
+    /// Drive the session through a connect/drop/reconnect cycle without a real transport, by
+    /// feeding it the events a session task would send.
+    fn feed(session: &mut Session, events: Vec<Event>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        for event in events {
+            tx.send(event).expect("channel open");
+        }
+        session.events = Some(rx);
+        // A dummy sender so the session believes a task is attached.
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        session.commands = Some(cmd_tx);
+        drain(session);
+    }
+
+    /// Process queued events without needing a runtime or egui context for the retry timer.
+    fn drain(session: &mut Session) {
+        let mut connected = false;
+        let mut dropped = false;
+        if let Some(events) = session.events.as_mut() {
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    Event::Connected => {
+                        session.state = ConnectionState::Connected;
+                        connected = true;
+                    }
+                    Event::Closed { reason } => {
+                        session.state = ConnectionState::Disconnected;
+                        session.commands = None;
+                        if reason.is_some() {
+                            session.last_error = reason;
+                            dropped = true;
+                        }
+                    }
+                    Event::PortChanged(name) => session.settings.serial.name = name,
+                    Event::Warning(m) => session.last_error = Some(m),
+                    Event::HostKey(_) => {}
+                }
+            }
+        }
+        if connected {
+            if session.has_connected {
+                session.reconnect_count += 1;
+                session.mark_reconnected();
+            }
+            session.has_connected = true;
+            session.retry_attempt = 0;
+            session.retry_at = None;
+        }
+        if dropped {
+            session.schedule_retry();
+        }
+    }
+
+    fn buffer_text(session: &Session) -> String {
+        let buffer = session.buffer.lock().unwrap();
+        (0..buffer.line_count())
+            .filter_map(|i| buffer.line(i))
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reconnecting_keeps_the_terminal_contents() {
+        // The headline requirement: a reconnect must not clear the window. The Tauri build did
+        // the opposite, wiping the buffer on every connect.
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        session.buffer.lock().unwrap().append(b"important output\r\n");
+
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped".into()),
+            }],
+        );
+        assert_eq!(session.state, ConnectionState::Disconnected);
+        assert!(
+            buffer_text(&session).contains("important output"),
+            "a drop must not clear the buffer"
+        );
+
+        feed(&mut session, vec![Event::Connected]);
+        let text = buffer_text(&session);
+        assert!(
+            text.contains("important output"),
+            "a reconnect must not clear the buffer"
+        );
+        assert!(text.contains("reconnected #1"), "and must mark the seam");
+    }
+
+    #[test]
+    fn the_first_connection_is_not_marked_as_a_reconnect() {
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        assert!(!buffer_text(&session).contains("reconnected"));
+        assert!(session.has_connected());
+    }
+
+    #[test]
+    fn each_reconnect_is_numbered() {
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        for expected in 1..=3 {
+            feed(
+                &mut session,
+                vec![Event::Closed {
+                    reason: Some("dropped".into()),
+                }],
+            );
+            feed(&mut session, vec![Event::Connected]);
+            assert!(buffer_text(&session).contains(&format!("reconnected #{expected}")));
+        }
+    }
+
+    #[test]
+    fn the_divider_resets_terminal_state_without_clearing_scrollback() {
+        // The remote screen state died with the connection, so the new session must not
+        // inherit a scroll region, the alternate screen, or leftover colours.
+        let mut session = ssh_session();
+        session.display_mode = DisplayMode::Ansi;
+        feed(&mut session, vec![Event::Connected]);
+
+        // Leave the old session in a thoroughly odd state.
+        session
+            .buffer
+            .lock()
+            .unwrap()
+            .append(b"before the drop\r\n\x1b[?1049h\x1b[1;5r\x1b[31m");
+        session.sync_emulator();
+        assert!(session
+            .emulator()
+            .unwrap()
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN));
+
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped".into()),
+            }],
+        );
+        feed(&mut session, vec![Event::Connected]);
+        session.sync_emulator();
+
+        let emulator = session.emulator().unwrap();
+        assert!(
+            !emulator
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN),
+            "the alternate screen must be left"
+        );
+        assert!(
+            emulator.all_text().contains("before the drop"),
+            "scrollback from before the drop must survive"
+        );
+        assert!(emulator.all_text().contains("reconnected"));
+    }
+
+    #[test]
+    fn the_divider_is_not_counted_as_received_data() {
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        session.buffer.lock().unwrap().append(b"12345");
+        let received = session.buffer.lock().unwrap().total_received();
+
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped".into()),
+            }],
+        );
+        feed(&mut session, vec![Event::Connected]);
+
+        assert_eq!(
+            session.buffer.lock().unwrap().total_received(),
+            received,
+            "an injected divider is not device output"
+        );
+    }
+
+    #[test]
+    fn a_clean_disconnect_is_not_treated_as_a_drop() {
+        let mut session = ssh_session();
+        session.auto_reconnect = true;
+        feed(&mut session, vec![Event::Connected]);
+        // `None` means the user asked to close.
+        feed(&mut session, vec![Event::Closed { reason: None }]);
+        assert!(
+            session.retry_countdown().is_none(),
+            "closing on purpose must not schedule a retry"
+        );
+        assert!(session.last_error.is_none());
+    }
+
+    #[test]
+    fn auto_reconnect_is_off_by_default_and_schedules_nothing() {
+        let mut session = ssh_session();
+        assert!(!session.auto_reconnect);
+        feed(&mut session, vec![Event::Connected]);
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped".into()),
+            }],
+        );
+        assert!(session.retry_countdown().is_none());
+    }
+
+    #[test]
+    fn auto_reconnect_backs_off_between_attempts() {
+        let mut session = ssh_session();
+        session.auto_reconnect = true;
+        feed(&mut session, vec![Event::Connected]);
+
+        let mut delays = Vec::new();
+        for _ in 0..4 {
+            feed(
+                &mut session,
+                vec![Event::Closed {
+                    reason: Some("dropped".into()),
+                }],
+            );
+            delays.push(session.retry_countdown().expect("a retry is scheduled").as_secs());
+            // Simulate the attempt starting and failing again.
+            session.state = ConnectionState::Disconnected;
+        }
+        // Strictly increasing, so a flapping link is not hammered.
+        assert!(
+            delays.windows(2).all(|w| w[1] > w[0]),
+            "delays should grow: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn a_successful_connection_resets_the_backoff() {
+        let mut session = ssh_session();
+        session.auto_reconnect = true;
+        feed(&mut session, vec![Event::Connected]);
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped".into()),
+            }],
+        );
+        let first = session.retry_countdown().unwrap().as_secs();
+        feed(&mut session, vec![Event::Connected]);
+        assert!(session.retry_countdown().is_none(), "success clears the timer");
+
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("dropped again".into()),
+            }],
+        );
+        assert_eq!(
+            session.retry_countdown().unwrap().as_secs(),
+            first,
+            "the backoff starts over after a success"
+        );
+    }
+
+    #[test]
+    fn auto_reconnect_does_not_retry_a_connection_that_never_worked() {
+        // Retrying a configuration error just repeats it.
+        let mut session = ssh_session();
+        session.auto_reconnect = true;
+        feed(
+            &mut session,
+            vec![Event::Closed {
+                reason: Some("no route to host".into()),
+            }],
+        );
+        assert!(!session.has_connected());
+        assert!(session.retry_countdown().is_none());
+    }
+
+    #[test]
+    fn a_reconnect_while_one_is_in_flight_is_ignored() {
+        // Idempotency is enforced by the state machine, not just by disabling the button.
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        session.state = ConnectionState::Reconnecting;
+        assert!(!session.can_connect());
+        assert!(session.is_busy());
+    }
+
+    #[test]
+    fn a_failed_attempt_re_enables_the_button() {
+        // The user's requirement: after a failure they can try again, repeatedly.
+        let mut session = ssh_session();
+        feed(&mut session, vec![Event::Connected]);
+        for _ in 0..3 {
+            session.state = ConnectionState::Reconnecting;
+            assert!(!session.can_connect());
+            feed(
+                &mut session,
+                vec![Event::Closed {
+                    reason: Some("refused".into()),
+                }],
+            );
+            assert_eq!(session.state, ConnectionState::Disconnected);
+            assert!(session.can_connect(), "the button must be usable again");
+        }
+    }
+
+    #[test]
+    fn a_pending_host_key_blocks_connecting_until_resolved() {
+        let mut session = ssh_session();
+        session.pending_host_key = Some(Rejection::Unknown {
+            host: "srv".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:abc".into(),
+        });
+        assert!(!session.can_connect());
+        session.reject_host_key();
+        assert!(session.can_connect());
+    }
+
+    #[test]
+    fn a_moved_serial_port_is_followed() {
+        let mut session = serial_session();
+        assert_eq!(session.settings.serial.name, "COM9");
+        feed(&mut session, vec![Event::PortChanged("COM14".into())]);
+        assert_eq!(
+            session.settings.serial.name, "COM14",
+            "a replugged adapter on a new port number should be followed"
+        );
+    }
+
+    #[test]
+    fn utc_timestamps_are_well_formed() {
+        let stamp = utc_hms();
+        assert!(stamp.ends_with(" UTC"), "got {stamp}");
+        let time = stamp.trim_end_matches(" UTC");
+        let parts: Vec<_> = time.split(':').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].parse::<u32>().unwrap() < 24);
+        assert!(parts[1].parse::<u32>().unwrap() < 60);
+        assert!(parts[2].parse::<u32>().unwrap() < 60);
     }
 
     #[test]

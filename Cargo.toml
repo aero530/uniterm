@@ -13,9 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 alacritty_terminal = "0.26"
-eframe = "0.35"
-egui_dock = "0.20"
+eframe = { version = "0.35", features = ["persistence"] }
+egui_dock = { version = "0.20", features = ["serde"] }
 rfd = "0.17"
+ron = "0.12"
 # `ring` rather than the default `aws-lc-rs` backend: aws-lc-sys is a C library that needs
 # CMake and NASM to build and fails outright on a stock Windows toolchain. `ring` keeps the
 # build pure-cargo. Pinned to a minor version because russh breaks API on every one.
@@ -25,6 +26,7 @@ russh = { version = "0.62.4", default-features = false, features = [
     "rsa",
 ] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
@@ -46,4 +48,3 @@ strip = true
 
 [dev-dependencies]
 bytes = "1"
-serde_json = "1"
