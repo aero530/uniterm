@@ -8,6 +8,7 @@
 
 mod app;
 mod discovery;
+mod knownhosts;
 mod session;
 mod settings;
 mod term;

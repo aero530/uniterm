@@ -9,7 +9,8 @@ use tokio::runtime::Handle;
 use crate::discovery::PortInfo;
 use crate::session::Session;
 use crate::settings::{
-    self, baud_label, DataBits, DisplayMode, FlowControl, Parity, SendMode, StopBits, BAUD_RATES,
+    self, baud_label, ConnectionKind, DataBits, DisplayMode, FlowControl, Parity, SendMode, SshAuth,
+    StopBits, BAUD_RATES,
 };
 use crate::term::{render, MAX_MAX_BYTES, MIN_MAX_BYTES};
 
@@ -24,38 +25,40 @@ pub fn controls(
     let connected = session.is_connected();
     let busy = session.is_busy();
 
+    // A host key waiting on the user takes over the strip: nothing else is actionable until
+    // it is resolved, and it must not be easy to miss.
+    if session.pending_host_key.is_some() {
+        host_key_prompt(ui, session, rt);
+        return;
+    }
+
     // ---- connection parameters and connect/disconnect ----
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(!busy, |ui| {
-            egui::ComboBox::from_id_salt((salt, "port"))
-                .selected_text(if session.settings.name.is_empty() {
-                    "Select port".to_owned()
-                } else {
-                    session.settings.name.clone()
-                })
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    if ports.is_empty() {
-                        ui.label("No serial ports found");
-                    }
-                    for port in ports {
-                        ui.selectable_value(
-                            &mut session.settings.name,
-                            port.name.clone(),
-                            port.label(),
-                        );
-                    }
-                });
-
-            combo(ui, (salt, "baud"), 110.0, &baud_label(session.settings.baud_rate), |ui| {
-                for baud in BAUD_RATES {
-                    ui.selectable_value(&mut session.settings.baud_rate, *baud, baud_label(*baud));
-                }
-            });
-            enum_combo(ui, (salt, "flow"), 130.0, &mut session.settings.flow_control, FlowControl::ALL, FlowControl::label);
-            enum_combo(ui, (salt, "data"), 130.0, &mut session.settings.data_bits, DataBits::ALL, DataBits::label);
-            enum_combo(ui, (salt, "parity"), 110.0, &mut session.settings.parity, Parity::ALL, Parity::label);
-            enum_combo(ui, (salt, "stop"), 120.0, &mut session.settings.stop_bits, StopBits::ALL, StopBits::label);
+            let previous_kind = session.settings.kind;
+            enum_combo(
+                ui,
+                (salt, "kind"),
+                80.0,
+                &mut session.settings.kind,
+                ConnectionKind::ALL,
+                ConnectionKind::label,
+            );
+            // Switching to SSH switches the view too: a remote shell emits escape sequences
+            // constantly, and the ASCII view would render them as `^[` noise.
+            if session.settings.kind != previous_kind
+                && session.settings.kind == ConnectionKind::Ssh
+                && session.display_mode != DisplayMode::Ansi
+            {
+                session.display_mode = DisplayMode::Ansi;
+            }
+            ui.separator();
+            // The parameters of one kind are meaningless for the other, so only one set is
+            // shown rather than half the row being greyed out.
+            match session.settings.kind {
+                ConnectionKind::Serial => serial_fields(ui, session, ports, salt),
+                ConnectionKind::Ssh => ssh_fields(ui, session, salt),
+            }
         });
 
         // These flow with the row rather than being right-aligned: aligning to the right
@@ -120,8 +123,13 @@ pub fn controls(
             ui.weak(format!("· {}x{}", size.columns, size.screen_lines))
                 .on_hover_text(
                     "Terminal size in columns and rows, derived from the pane size and font. \
-                     Resizing the pane resizes the terminal.",
+                     Resizing the pane resizes the terminal, and SSH sessions tell the remote \
+                     end so full-screen programs reflow.",
                 );
+        }
+        if session.settings.kind == ConnectionKind::Ssh {
+            // The tab header omits the port, so show the full identity here.
+            ui.weak(format!("· {}", session.settings.ssh.identity()));
         }
 
         ui.separator();
@@ -249,6 +257,180 @@ pub fn controls(
             }
         });
     }
+}
+
+/// Serial port parameters.
+fn serial_fields(ui: &mut Ui, session: &mut Session, ports: &[PortInfo], salt: u64) {
+    let serial = &mut session.settings.serial;
+
+    egui::ComboBox::from_id_salt((salt, "port"))
+        .selected_text(if serial.name.is_empty() {
+            "Select port".to_owned()
+        } else {
+            serial.name.clone()
+        })
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            if ports.is_empty() {
+                ui.label("No serial ports found");
+            }
+            for port in ports {
+                ui.selectable_value(&mut serial.name, port.name.clone(), port.label());
+            }
+        });
+
+    combo(ui, (salt, "baud"), 110.0, &baud_label(serial.baud_rate), |ui| {
+        for baud in BAUD_RATES {
+            ui.selectable_value(&mut serial.baud_rate, *baud, baud_label(*baud));
+        }
+    });
+    enum_combo(ui, (salt, "flow"), 130.0, &mut serial.flow_control, FlowControl::ALL, FlowControl::label);
+    enum_combo(ui, (salt, "data"), 130.0, &mut serial.data_bits, DataBits::ALL, DataBits::label);
+    enum_combo(ui, (salt, "parity"), 110.0, &mut serial.parity, Parity::ALL, Parity::label);
+    enum_combo(ui, (salt, "stop"), 120.0, &mut serial.stop_bits, StopBits::ALL, StopBits::label);
+}
+
+/// SSH connection parameters and credentials.
+fn ssh_fields(ui: &mut Ui, session: &mut Session, salt: u64) {
+    ui.label("Host");
+    ui.add(
+        egui::TextEdit::singleline(&mut session.settings.ssh.host)
+            .desired_width(160.0)
+            .hint_text("hostname or IP")
+            .id_salt((salt, "host")),
+    );
+
+    ui.label("Port");
+    ui.add(
+        egui::DragValue::new(&mut session.settings.ssh.port)
+            .range(1..=65535)
+            .speed(1.0),
+    );
+
+    ui.label("User");
+    ui.add(
+        egui::TextEdit::singleline(&mut session.settings.ssh.user)
+            .desired_width(110.0)
+            .id_salt((salt, "user")),
+    );
+
+    enum_combo(
+        ui,
+        (salt, "auth"),
+        120.0,
+        &mut session.settings.ssh.auth,
+        SshAuth::ALL,
+        SshAuth::label,
+    );
+
+    // Secrets are typed here and held in memory only; they are never written to disk.
+    match session.settings.ssh.auth {
+        SshAuth::Password => {
+            ui.add(
+                egui::TextEdit::singleline(&mut session.credentials.password)
+                    .desired_width(130.0)
+                    .password(true)
+                    .hint_text("password")
+                    .id_salt((salt, "password")),
+            )
+            .on_hover_text("Held in memory for this session only. Never written to disk.");
+        }
+        SshAuth::PublicKey => {
+            let label = session
+                .settings
+                .ssh
+                .key_path
+                .as_ref()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "Choose key…".to_owned());
+            if ui
+                .button(label)
+                .on_hover_text(
+                    session
+                        .settings
+                        .ssh
+                        .key_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Select an OpenSSH private key file".to_owned()),
+                )
+                .clicked()
+            {
+                let mut dialog = rfd::FileDialog::new();
+                if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+                {
+                    dialog = dialog.set_directory(std::path::PathBuf::from(home).join(".ssh"));
+                }
+                if let Some(path) = dialog.pick_file() {
+                    session.settings.ssh.key_path = Some(path);
+                }
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut session.credentials.passphrase)
+                    .desired_width(120.0)
+                    .password(true)
+                    .hint_text("passphrase")
+                    .id_salt((salt, "passphrase")),
+            )
+            .on_hover_text("Leave blank for an unencrypted key. Never written to disk.");
+        }
+    }
+}
+
+/// Trust-on-first-use prompt for an unrecognised host key.
+///
+/// Only reached for [`crate::knownhosts::Rejection::Unknown`]. A changed key is reported as an
+/// error and has no accept path at all — waving that through is exactly what recording host
+/// keys exists to prevent.
+fn host_key_prompt(ui: &mut Ui, session: &mut Session, rt: &Handle) {
+    let Some(rejection) = session.pending_host_key.clone() else {
+        return;
+    };
+    let (host, port, algorithm, fingerprint) = match &rejection {
+        crate::knownhosts::Rejection::Unknown {
+            host,
+            port,
+            algorithm,
+            fingerprint,
+        } => (host, port, algorithm, fingerprint),
+        // Not promptable; nothing to draw.
+        crate::knownhosts::Rejection::Changed { .. } => return,
+    };
+
+    egui::Frame::default()
+        .fill(ui.visuals().widgets.active.bg_fill.gamma_multiply(0.35))
+        .stroke(egui::Stroke::new(1.0, ui.visuals().warn_fg_color))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, "⚠");
+                ui.strong(format!("{host}:{port} is not in your known_hosts."));
+            });
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Key type");
+                ui.code(algorithm);
+                ui.label("fingerprint");
+                ui.code(fingerprint);
+            });
+            ui.add_space(2.0);
+            ui.label(
+                "Confirm this fingerprint through a channel you already trust before accepting. \
+                 Accepting records it in ~/.ssh/known_hosts and connects.",
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Accept and connect").clicked() {
+                    session.accept_host_key_and_connect(rt, ui.ctx());
+                }
+                if ui.button("Reject").clicked() {
+                    session.reject_host_key();
+                }
+                if ui.button("Copy fingerprint").clicked() {
+                    ui.ctx().copy_text(fingerprint.clone());
+                }
+            });
+        });
 }
 
 /// Compact byte count for the status readout.

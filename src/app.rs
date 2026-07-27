@@ -18,7 +18,7 @@ use tokio::runtime::Handle;
 
 use crate::discovery::{self, PortInfo};
 use crate::session::Session;
-use crate::settings::SerialSettings;
+use crate::settings::ConnectionSettings;
 use crate::term::{input, render};
 use crate::ui;
 
@@ -62,9 +62,9 @@ impl UniTermApp {
         let id = TabId(self.next_id);
         self.next_id += 1;
 
-        let mut settings = SerialSettings::default();
+        let mut settings = ConnectionSettings::default();
         if let Some(first) = self.ports.first() {
-            settings.name = first.name.clone();
+            settings.serial.name = first.name.clone();
         }
 
         self.sessions.insert(id, Session::new(settings));

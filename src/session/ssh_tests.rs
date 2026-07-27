@@ -1,0 +1,534 @@
+//! End-to-end tests for the SSH client against a real in-process SSH server.
+//!
+//! Without these the SSH path would only be known to *compile*. russh has a server side, so
+//! the whole thing is exercised for real over a loopback TCP connection: key exchange, host
+//! key verification, password and public-key authentication, the PTY and shell requests, data
+//! in both directions, and window resizing.
+//!
+//! Most importantly it tests the trust policy against a live handshake — that an unknown host
+//! is refused with a usable fingerprint, that approving *that* fingerprint connects and
+//! records the key, that a subsequent connection needs no approval, and that a substituted
+//! key is refused as a change rather than quietly accepted.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use russh::keys::PrivateKey;
+use russh::server::{self, Auth, Msg, Server as _, Session as ServerSession};
+use russh::{Channel, ChannelId};
+
+use super::ssh::{self, Credentials};
+use crate::knownhosts::{self, Rejection, Trust};
+use crate::settings::{SshAuth, SshSettings};
+
+/// Fixed host key, so tests need no RNG and fingerprints are deterministic.
+const HOST_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAAVBqdkXYfu/7q7B8nxDpbqHQkTXyxzzHDNNqrdgLQdAAAAJArnd7BK53e
+wQAAAAtzc2gtZWQyNTUxOQAAACAAVBqdkXYfu/7q7B8nxDpbqHQkTXyxzzHDNNqrdgLQdA
+AAAEDLtfar2afxw9UR1kzjEVEcvkPJxo/o+Jm6WoM7n1XXuQBUGp2Rdh+7/ursHyfEOluo
+dCRNfLHPMcM02qt2AtB0AAAADHVuaXRlcm0tdGVzdAE=
+-----END OPENSSH PRIVATE KEY-----
+";
+
+/// A different key, used to simulate the host key changing under us.
+const OTHER_KEY: &str =
+    "AAAAC3NzaC1lZDI1NTE5AAAAIGIOya00NHtlVjWcc2n43OG86cbco7o/N0vC+N+QFrLV";
+
+const USER: &str = "tester";
+const PASSWORD: &str = "s3cret";
+/// What the fake shell writes as soon as it starts.
+const GREETING: &str = "welcome to the test shell\r\n";
+
+/// What the server observed, so assertions can check the client's side of the protocol.
+#[derive(Default)]
+struct Observed {
+    pty_requested: Option<(u32, u32)>,
+    shell_requested: bool,
+    received: Vec<u8>,
+    window_changes: Vec<(u32, u32)>,
+    auth_attempts: Vec<String>,
+}
+
+#[derive(Clone)]
+struct TestServer {
+    observed: Arc<Mutex<Observed>>,
+}
+
+impl server::Server for TestServer {
+    type Handler = Self;
+
+    fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Self {
+        self.clone()
+    }
+}
+
+impl server::Handler for TestServer {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.observed
+            .lock()
+            .unwrap()
+            .auth_attempts
+            .push(format!("password:{user}"));
+        if user == USER && password == PASSWORD {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        self.observed
+            .lock()
+            .unwrap()
+            .auth_attempts
+            .push(format!("publickey:{user}"));
+        // Any key is accepted; the point is exercising the client's signing path.
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        reply: server::ChannelOpenHandle,
+        _session: &mut ServerSession,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        _channel: ChannelId,
+        _term: &str,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        _session: &mut ServerSession,
+    ) -> Result<(), Self::Error> {
+        self.observed.lock().unwrap().pty_requested = Some((col_width, row_height));
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut ServerSession,
+    ) -> Result<(), Self::Error> {
+        self.observed.lock().unwrap().shell_requested = true;
+        // Write a greeting so the client has something to read.
+        session.data(channel, bytes::Bytes::from_static(GREETING.as_bytes()))?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut ServerSession,
+    ) -> Result<(), Self::Error> {
+        self.observed
+            .lock()
+            .unwrap()
+            .received
+            .extend_from_slice(data);
+        // Echo it back uppercased, so the client can prove the round trip.
+        let echo = bytes::Bytes::from(data.to_ascii_uppercase());
+        session.data(channel, echo)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut ServerSession,
+    ) -> Result<(), Self::Error> {
+        self.observed
+            .lock()
+            .unwrap()
+            .window_changes
+            .push((col_width, row_height));
+        Ok(())
+    }
+}
+
+/// Start the test server on an ephemeral port. Returns the port and what it observes.
+async fn start_server() -> (u16, Arc<Mutex<Observed>>) {
+    let key = PrivateKey::from_openssh(HOST_KEY).expect("host key parses");
+    let config = Arc::new(server::Config {
+        keys: vec![key],
+        ..Default::default()
+    });
+
+    let observed = Arc::new(Mutex::new(Observed::default()));
+    let mut server = TestServer {
+        observed: Arc::clone(&observed),
+    };
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+
+    tokio::spawn(async move {
+        let _ = server.run_on_address(config, ("127.0.0.1", port)).await;
+    });
+
+    // Wait for the listener to accept connections rather than sleeping blindly.
+    for _ in 0..200 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    (port, observed)
+}
+
+/// The host key's fingerprint, as the client will report it.
+fn host_fingerprint() -> String {
+    let key = PrivateKey::from_openssh(HOST_KEY).expect("host key parses");
+    knownhosts::fingerprint(key.public_key())
+}
+
+fn temp_known_hosts(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("uniterm_ssh_e2e_{name}"));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn password_settings(port: u16) -> SshSettings {
+    SshSettings {
+        host: "127.0.0.1".into(),
+        port,
+        user: USER.into(),
+        auth: SshAuth::Password,
+        key_path: None,
+        term: "xterm-256color".into(),
+    }
+}
+
+fn creds() -> Credentials {
+    Credentials {
+        password: PASSWORD.into(),
+        passphrase: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_host_is_refused_with_a_usable_fingerprint() {
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("unknown");
+
+    let result = ssh::connect(
+        password_settings(port),
+        creds(),
+        None,
+        store.clone(),
+        80,
+        24,
+    )
+    .await;
+
+    match result {
+        Err(ssh::Error::HostKey(Rejection::Unknown {
+            fingerprint,
+            algorithm,
+            ..
+        })) => {
+            assert_eq!(fingerprint, host_fingerprint());
+            assert_eq!(algorithm, "ssh-ed25519");
+        }
+        other => panic!("expected an unknown-host rejection, got {other:?}"),
+    }
+    // Nothing was recorded by a refused connection.
+    assert!(!store.exists() || std::fs::read_to_string(&store).unwrap().trim().is_empty());
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn approving_the_fingerprint_connects_and_records_the_key() {
+    let (port, observed) = start_server().await;
+    let store = temp_known_hosts("approve");
+
+    let transport = ssh::connect(
+        password_settings(port),
+        creds(),
+        Some(host_fingerprint()),
+        store.clone(),
+        100,
+        40,
+    )
+    .await
+    .expect("approved connection succeeds");
+
+    // The PTY and shell were requested at the size we asked for. These are awaited rather
+    // than asserted immediately: `request_pty` does not block for the server's reply, so the
+    // server may not have processed it by the time `connect` returns.
+    wait_for(&observed, |o| o.pty_requested.is_some() && o.shell_requested).await;
+    {
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.pty_requested, Some((100, 40)));
+        assert_eq!(observed.auth_attempts, vec![format!("password:{USER}")]);
+    }
+
+    // The key is now trusted for next time.
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    assert_eq!(
+        knownhosts::check("127.0.0.1", port, key.public_key(), &store),
+        Trust::Known
+    );
+
+    transport.close().await;
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn approving_a_different_fingerprint_does_not_authorise_the_real_one() {
+    // Approval is bound to the exact key the user was shown.
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("wrongfp");
+
+    let result = ssh::connect(
+        password_settings(port),
+        creds(),
+        Some("SHA256:not-the-key-you-were-shown".to_owned()),
+        store.clone(),
+        80,
+        24,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(ssh::Error::HostKey(Rejection::Unknown { .. }))),
+        "a mismatched approval must not let the connection through"
+    );
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn a_known_host_connects_without_any_approval() {
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("known");
+
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), &store).unwrap();
+
+    let transport = ssh::connect(password_settings(port), creds(), None, store.clone(), 80, 24)
+        .await
+        .expect("a recorded host needs no prompt");
+    transport.close().await;
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn a_substituted_host_key_is_refused_as_changed() {
+    // The man-in-the-middle case: something else is recorded for this host and key type.
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("changed");
+
+    let impostor = russh::keys::parse_public_key_base64(OTHER_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, &impostor, &store).unwrap();
+
+    let result = ssh::connect(password_settings(port), creds(), None, store.clone(), 80, 24).await;
+    match result {
+        Err(ssh::Error::HostKey(rejection @ Rejection::Changed { .. })) => {
+            assert!(
+                !rejection.is_promptable(),
+                "a changed key must never be promptable"
+            );
+            assert!(rejection.message().to_lowercase().contains("intercept"));
+        }
+        other => panic!("expected a changed-key rejection, got {other:?}"),
+    }
+
+    // Even offering the real fingerprint must not override a recorded mismatch.
+    let result = ssh::connect(
+        password_settings(port),
+        creds(),
+        Some(host_fingerprint()),
+        store.clone(),
+        80,
+        24,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ssh::Error::HostKey(Rejection::Changed { .. }))),
+        "approval must not be able to wave through a changed host key"
+    );
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn a_wrong_password_is_reported_as_an_auth_failure() {
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("badpass");
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), &store).unwrap();
+
+    let result = ssh::connect(
+        password_settings(port),
+        Credentials {
+            password: "wrong".into(),
+            passphrase: String::new(),
+        },
+        None,
+        store.clone(),
+        80,
+        24,
+    )
+    .await;
+
+    match result {
+        Err(ssh::Error::Auth(message)) => {
+            assert!(message.to_lowercase().contains("auth"), "got {message}");
+        }
+        other => panic!("expected an auth error, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn data_flows_both_ways_and_resize_reaches_the_server() {
+    let (port, observed) = start_server().await;
+    let store = temp_known_hosts("dataflow");
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), &store).unwrap();
+
+    let mut transport =
+        ssh::connect(password_settings(port), creds(), None, store.clone(), 80, 24)
+            .await
+            .expect("connect");
+
+    // Wrap in the Transport enum, which is what the session loop actually drives.
+    let mut transport_enum = super::transport::Transport::Ssh(transport);
+
+    // The shell's greeting arrives.
+    let greeting = read_until(&mut transport_enum, GREETING.len()).await;
+    assert_eq!(String::from_utf8_lossy(&greeting), GREETING);
+
+    // Send data; the server records it and echoes it uppercased.
+    transport_enum.send(b"hello").await.expect("send");
+    let echo = read_until(&mut transport_enum, 5).await;
+    assert_eq!(&echo, b"HELLO", "the round trip must come back");
+    assert_eq!(observed.lock().unwrap().received, b"hello");
+
+    // Resizing tells the remote end, so full-screen programs reflow.
+    transport_enum.resize(132, 50).await.expect("resize");
+    wait_for(&observed, |o| !o.window_changes.is_empty()).await;
+    assert_eq!(observed.lock().unwrap().window_changes, vec![(132, 50)]);
+
+    transport = match transport_enum {
+        super::transport::Transport::Ssh(ssh) => ssh,
+        _ => unreachable!(),
+    };
+    transport.close().await;
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn public_key_authentication_works() {
+    let (port, observed) = start_server().await;
+    let store = temp_known_hosts("pubkey");
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), &store).unwrap();
+
+    // Reuse the fixed key as a client key; the server accepts any.
+    let key_file = std::env::temp_dir().join("uniterm_ssh_e2e_client_key");
+    std::fs::write(&key_file, HOST_KEY).unwrap();
+
+    let settings = SshSettings {
+        auth: SshAuth::PublicKey,
+        key_path: Some(key_file.clone()),
+        ..password_settings(port)
+    };
+
+    let transport = ssh::connect(settings, Credentials::default(), None, store.clone(), 80, 24)
+        .await
+        .expect("public key auth succeeds");
+
+    assert_eq!(
+        observed.lock().unwrap().auth_attempts,
+        vec![format!("publickey:{USER}")]
+    );
+
+    transport.close().await;
+    let _ = std::fs::remove_file(&store);
+    let _ = std::fs::remove_file(&key_file);
+}
+
+#[tokio::test]
+async fn a_missing_key_file_is_reported_clearly() {
+    let (port, _observed) = start_server().await;
+    let store = temp_known_hosts("nokey");
+    let key = PrivateKey::from_openssh(HOST_KEY).unwrap();
+    knownhosts::learn("127.0.0.1", port, key.public_key(), &store).unwrap();
+
+    let settings = SshSettings {
+        auth: SshAuth::PublicKey,
+        key_path: Some(PathBuf::from("this-file-does-not-exist")),
+        ..password_settings(port)
+    };
+
+    match ssh::connect(settings, Credentials::default(), None, store.clone(), 80, 24).await {
+        Err(ssh::Error::Auth(message)) => {
+            assert!(message.contains("this-file-does-not-exist"), "got {message}");
+        }
+        other => panic!("expected an auth error naming the file, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&store);
+}
+
+#[tokio::test]
+async fn connecting_to_a_closed_port_is_reported_not_hung() {
+    let store = temp_known_hosts("refused");
+    // Port 1 on loopback: nothing listens there.
+    let result = ssh::connect(password_settings(1), creds(), None, store.clone(), 80, 24).await;
+    match result {
+        Err(ssh::Error::Other(message)) => assert!(message.contains("127.0.0.1:1"), "got {message}"),
+        other => panic!("expected a connect error, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&store);
+}
+
+/// Wait until the server has observed something, or fail the test.
+async fn wait_for(observed: &Arc<Mutex<Observed>>, ready: impl Fn(&Observed) -> bool) {
+    for _ in 0..500 {
+        if ready(&observed.lock().unwrap()) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the server never observed the expected request");
+}
+
+/// Read from the transport until at least `want` bytes have arrived.
+async fn read_until(transport: &mut super::transport::Transport, want: usize) -> Vec<u8> {
+    use super::transport::Incoming;
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while out.len() < want {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for {want} bytes");
+        match tokio::time::timeout(remaining, transport.recv()).await {
+            Ok(Incoming::Data(data)) => out.extend_from_slice(&data),
+            Ok(Incoming::Closed(reason)) => panic!("closed early: {reason:?}"),
+            Err(_) => panic!("timed out waiting for {want} bytes; got {out:?}"),
+        }
+    }
+    out
+}

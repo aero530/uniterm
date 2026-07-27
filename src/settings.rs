@@ -5,7 +5,139 @@
 //! that the SSH work (plan task 2) can wrap them in a `ConnectionKind` enum without
 //! touching the widgets.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+/// Which kind of connection a tab holds.
+///
+/// Serial parameters (baud, parity, data bits, stop bits) are meaningless over SSH, and SSH
+/// parameters are meaningless over serial, so the UI is kind-aware rather than greying out
+/// half its controls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionKind {
+    #[default]
+    Serial,
+    Ssh,
+}
+
+impl ConnectionKind {
+    pub const ALL: &'static [Self] = &[Self::Serial, Self::Ssh];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Serial => "Serial",
+            Self::Ssh => "SSH",
+        }
+    }
+}
+
+/// Everything needed to open a connection of either kind.
+///
+/// Both sub-structs are kept populated regardless of the selected kind, so switching kind
+/// back and forth does not discard what you already typed.
+///
+/// Note what is *absent*: passwords and key passphrases. Those live only in
+/// [`crate::session::Session`] for the lifetime of the process and are never written here,
+/// because this struct is what plan tasks 4 and 5 will persist to disk.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ConnectionSettings {
+    pub kind: ConnectionKind,
+    pub serial: SerialSettings,
+    pub ssh: SshSettings,
+}
+
+impl ConnectionSettings {
+    /// Short label for the tab header.
+    pub fn label(&self) -> String {
+        match self.kind {
+            ConnectionKind::Serial => {
+                if self.serial.name.is_empty() {
+                    "(no port)".to_owned()
+                } else {
+                    self.serial.name.clone()
+                }
+            }
+            ConnectionKind::Ssh => {
+                if self.ssh.host.is_empty() {
+                    "(no host)".to_owned()
+                } else if self.ssh.user.is_empty() {
+                    self.ssh.host.clone()
+                } else {
+                    format!("{}@{}", self.ssh.user, self.ssh.host)
+                }
+            }
+        }
+    }
+
+    /// Whether enough has been filled in to attempt a connection.
+    pub fn is_complete(&self) -> Result<(), &'static str> {
+        match self.kind {
+            ConnectionKind::Serial if self.serial.name.is_empty() => Err("Select a port first."),
+            ConnectionKind::Ssh if self.ssh.host.is_empty() => Err("Enter a host first."),
+            ConnectionKind::Ssh if self.ssh.user.is_empty() => Err("Enter a username first."),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// How to authenticate an SSH connection.
+///
+/// ssh-agent is deliberately absent: it needs a named-pipe transport on Windows and a
+/// separate code path, and a half-working option is worse than no option. It belongs with
+/// the credential-storage work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshAuth {
+    #[default]
+    Password,
+    /// A private key file on disk, optionally passphrase-protected.
+    PublicKey,
+}
+
+impl SshAuth {
+    pub const ALL: &'static [Self] = &[Self::Password, Self::PublicKey];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Password => "Password",
+            Self::PublicKey => "Private key",
+        }
+    }
+}
+
+/// Everything needed to open an SSH session, minus the secrets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SshSettings {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: SshAuth,
+    /// Private key file, used when `auth` is [`SshAuth::PublicKey`].
+    pub key_path: Option<PathBuf>,
+    /// `TERM` advertised to the remote end.
+    pub term: String,
+}
+
+impl Default for SshSettings {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            auth: SshAuth::default(),
+            key_path: None,
+            // 256-colour is what the emulator actually supports, so claim it.
+            term: "xterm-256color".to_owned(),
+        }
+    }
+}
+
+impl SshSettings {
+    /// `user@host:port`, the identity used for the recent-connections list and known_hosts.
+    pub fn identity(&self) -> String {
+        format!("{}@{}:{}", self.user, self.host, self.port)
+    }
+}
 
 /// Everything needed to open a serial port.
 #[derive(Clone, Debug, Serialize, Deserialize)]

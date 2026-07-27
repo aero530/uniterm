@@ -9,6 +9,12 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
 
 * Dockable, splittable views — drag a tab header to split; drag tabs between panes or out
   into their own window
+* **Serial and SSH** in the same window, a tab at a time. SSH gets a real PTY, password or
+  private-key authentication, and window-resize notification so full-screen programs reflow
+  when you resize the pane.
+* **Host keys are verified** against `~/.ssh/known_hosts`, interoperating with OpenSSH. An
+  unrecognised host shows its fingerprint and is only trusted if you say so; a host key that
+  has *changed* is refused outright, because that is what interception looks like.
 * **Full terminal emulation** in ANSI mode, built on
   [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) — the same core
   Alacritty ships. Cursor addressing, erase, scroll regions, the alternate screen buffer,
@@ -40,10 +46,10 @@ Download the latest release from [releases](https://github.com/aero530/uniterm/r
 
 See [PLAN.md](PLAN.md) for the full plan and sizing. In short:
 
-* SSH connections alongside serial
 * A reconnect button that preserves the terminal contents
 * Session and layout persistence across restarts
 * A recent-connections list
+* ssh-agent authentication, and optional credential storage in the OS keychain
 
 [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md) records why egui was chosen over gpui.
 
@@ -62,8 +68,22 @@ See [PLAN.md](PLAN.md) for the full plan and sizing. In short:
   The raw ring has to exist so that switching display modes can replay it, and the two count
   scrollback in different units (bytes vs lines), so the line limit is derived from the byte
   budget as an estimate.
+* **Passwords and key passphrases are never written to disk.** They live in memory for the
+  life of the process, which also means a reconnect after a restart asks again. Persisting
+  them is only acceptable via the OS keychain, which is not built yet.
+* **ssh-agent is not supported.** It needs a named-pipe transport on Windows and a separate
+  code path; a half-working option would be worse than none.
+* **A server that refuses a PTY yields a line-mode shell rather than an error.** russh does
+  not block for the PTY reply, so the refusal arrives too late to report.
 * The bundled monospace font is egui's built-in one. Embedding Fira Code needs the TTF
   added to `resources/`.
+
+### A note on the SSH crypto backend
+
+`russh` defaults to the `aws-lc-rs` backend, whose `aws-lc-sys` crate is a C library needing
+CMake and NASM — it does not build on a stock Windows toolchain. UniTerm selects the `ring`
+backend instead, so `cargo build` stays pure cargo with no external build tools. See the
+comment in [Cargo.toml](Cargo.toml).
 
 ## Development
 
@@ -114,8 +134,11 @@ RUST_LOG=uniterm=debug cargo run
 |---|---|
 | [src/main.rs](src/main.rs) | eframe entry point, tokio runtime, tracing setup |
 | [src/app.rs](src/app.rs) | `eframe::App`, the dock, the tab viewer, the toolbar |
-| [src/session.rs](src/session.rs) | Connection lifecycle and the async serial task |
-| [src/settings.rs](src/settings.rs) | Port parameters, display and send modes |
+| [src/session/mod.rs](src/session/mod.rs) | Connection lifecycle and the transport-agnostic loop |
+| [src/session/transport.rs](src/session/transport.rs) | Serial and SSH behind one interface |
+| [src/session/ssh.rs](src/session/ssh.rs) | SSH connect, host key policy, auth, PTY |
+| [src/knownhosts.rs](src/knownhosts.rs) | Host key trust store |
+| [src/settings.rs](src/settings.rs) | Connection parameters, display and send modes |
 | [src/discovery.rs](src/discovery.rs) | Serial port enumeration |
 | [src/term/mod.rs](src/term/mod.rs) | The raw byte ring, and why it is the source of truth |
 | [src/term/emu.rs](src/term/emu.rs) | Terminal emulator wrapper |
