@@ -71,6 +71,44 @@ function Get-MsiProperty($msiPath, $property) {
 }
 
 <#
+    Size of a stream in the MSI's Binary table.
+
+    Used to confirm the installer carries our artwork rather than the bitmaps bundled in
+    WixUIExtension. Size is enough to pin it: for an uncompressed 24-bit BMP the byte count is
+    a function of the dimensions alone, so the expected values below are derived, not sampled.
+#>
+function Get-MsiBinarySize($msiPath, $name) {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msiPath, 0))
+    $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db,
+        @("SELECT Data FROM Binary WHERE Name = '$name'"))
+    [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+    $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+    $size = if ($record) { [int]$record.GetType().InvokeMember('DataSize', 'GetProperty', $null, $record, @(1)) } else { -1 }
+    [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+    return $size
+}
+
+<#
+    Read the text of a control out of a dialog in the MSI's Control table.
+
+    Used for the licence page. The interesting failure is silent: if WixUILicenseRtf is not set,
+    WiX substitutes the Lorem ipsum placeholder from WixUIExtension and the installer builds,
+    validates and installs perfectly well while asking people to accept filler text.
+#>
+function Get-MsiDialogText($msiPath, $dialog, $control) {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msiPath, 0))
+    $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db,
+        @("SELECT Text FROM Control WHERE Dialog_ = '$dialog' AND Control = '$control'"))
+    [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+    $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+    $value = if ($record) { [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1)) } else { $null }
+    [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+    return $value
+}
+
+<#
     Installs of *this* product, identified by UpgradeCode.
 
     Scoping by UpgradeCode rather than by product name matters: the Tauri-era 1.x release is also
@@ -140,6 +178,26 @@ $summary = $db.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null
 $wordCount = $summary.GetType().InvokeMember('Property', 'GetProperty', $null, $summary, @(15))
 # Bit 3 of the Word Count summary property means "elevated privileges are not required".
 Test-Claim 'declares that elevation is not required' (($wordCount -band 8) -eq 8) "word count = $wordCount"
+
+$licenseText = Get-MsiDialogText $Msi 'LicenseAgreementDlg' 'LicenseText'
+Test-Claim 'the licence page shows the real licence' `
+    ($licenseText -and $licenseText -match 'Apache License') `
+    'the LicenseAgreementDlg text does not mention the Apache License'
+Test-Claim 'the licence page is not placeholder text' `
+    ($licenseText -notmatch 'Lorem ipsum') `
+    'WiX substituted its bundled placeholder License.rtf - is WixUILicenseRtf set?'
+
+# An uncompressed 24-bit BMP is 54 bytes of header plus one row per line, each row padded up to
+# a 4-byte boundary: 54 + (ceil(width * 3 / 4) * 4) * height. At the sizes WixUI requires that
+# is 54 + 1480*58 for the banner and 54 + 1480*312 for the panel. Checking the byte count
+# therefore checks the dimensions and the pixel format together, without decoding the stream.
+foreach ($art in @(@{ Name = 'WixUI_Bmp_Banner'; Size = 85894;  Dims = '493x58' },
+                   @{ Name = 'WixUI_Bmp_Dialog'; Size = 461814; Dims = '493x312' })) {
+    $actual = Get-MsiBinarySize $Msi $art.Name
+    Test-Claim "$($art.Name) is our $($art.Dims) artwork" `
+        ($actual -eq $art.Size) `
+        "expected $($art.Size) bytes for a 24-bit $($art.Dims) BMP, found $actual - WiX's own bitmap, or a different size or colour depth"
+}
 
 Write-Step 'Silent install as a normal user'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

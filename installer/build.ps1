@@ -193,6 +193,122 @@ Provide it one of these ways:
 }
 
 # ---------------------------------------------------------------------------------------
+<#
+    Render the repository's LICENSE into the RTF that the installer's license page shows.
+
+    WixUI's LicenseAgreementDlg takes its text from the WixUILicenseRtf variable, and when that
+    is not set WiX quietly substitutes the placeholder License.rtf bundled in WixUIExtension --
+    which is Lorem ipsum. An installer that asks people to accept filler text was shipping for
+    exactly that reason, so the real licence is generated here rather than left to a default.
+
+    Generated at build time instead of committing a second copy: an RTF checked in beside
+    LICENSE is a duplicate that drifts, and the whole point is that the dialog shows the
+    licence the project is actually under.
+
+    Monospace, and one \par per source line, because the Apache text is laid out with leading
+    spaces -- a centred title and indented clauses -- which a proportional font would ragged.
+#>
+function New-LicenseRtf {
+    param([Parameter(Mandatory)][string] $TextPath,
+          [Parameter(Mandatory)][string] $RtfPath)
+
+    if (-not (Test-Path -LiteralPath $TextPath)) { throw "licence text not found: $TextPath" }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fmodern\fcharset0 Courier New;}}')
+    [void]$sb.Append("`r`n" + '\viewkind4\uc1\pard\f0\fs16 ')
+
+    foreach ($line in (Get-Content -LiteralPath $TextPath)) {
+        # Backslash and braces are RTF syntax; anything above ASCII needs a \u escape.
+        $escaped = $line.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}')
+        $out = [System.Text.StringBuilder]::new()
+        foreach ($ch in $escaped.ToCharArray()) {
+            if ([int]$ch -gt 127) { [void]$out.Append('\u' + [int]$ch + '?') }
+            else { [void]$out.Append($ch) }
+        }
+        # The newline after \par is what terminates the control word, so a following line's
+        # leading spaces survive as literal text rather than being eaten as a delimiter.
+        [void]$sb.Append($out.ToString() + '\par' + "`r`n")
+    }
+    [void]$sb.Append('}')
+
+    # ASCII: every byte above 127 has already been escaped, and a BOM would be shown verbatim.
+    [System.IO.File]::WriteAllText($RtfPath, $sb.ToString(), [System.Text.ASCIIEncoding]::new())
+    Write-Note "Licence page generated from LICENSE ($((Get-Item $RtfPath).Length) bytes of RTF)"
+}
+
+<#
+    Render the installer's two WixUI bitmaps from resources/icon.png.
+
+    Without these, WiX uses the bitmaps bundled in WixUIExtension, which carry its own artwork —
+    the red graphic that used to sit in the top-right of every page.
+
+    The sizes are fixed by WixUI, not chosen here: the banner across the top of most pages is
+    493x58, and the panel behind the Welcome and Finish pages is 493x312. A bitmap of any other
+    size is not rejected, it just renders wrong, which is why the dimensions are asserted below.
+
+    Both are generated at build time rather than committed, for the same reason as the licence
+    page: resources/icon.png is the single source of the artwork, and half a megabyte of
+    uncompressed BMP in git that can drift from it earns nothing.
+
+    Layout is dictated by where WixUI puts its text. The page title is drawn over the left of the
+    banner and the welcome text over the right two-thirds of the panel, both in dark ink — so
+    those regions stay white and the artwork keeps to the opposite side.
+#>
+function New-UiBitmaps {
+    param([Parameter(Mandatory)][string] $IconPath,
+          [Parameter(Mandatory)][string] $BannerPath,
+          [Parameter(Mandatory)][string] $DialogPath)
+
+    if (-not (Test-Path -LiteralPath $IconPath)) { throw "icon not found: $IconPath" }
+    Add-Type -AssemblyName System.Drawing
+
+    $icon = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $IconPath))
+    try {
+        # --- banner: white, icon on the right, clear of the page title on the left ---
+        $banner = New-Object System.Drawing.Bitmap(493, 58, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+        $g = [System.Drawing.Graphics]::FromImage($banner)
+        try {
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $g.Clear([System.Drawing.Color]::White)
+            $g.DrawImage($icon, (New-Object System.Drawing.Rectangle(433, 5, 48, 48)))
+        } finally { $g.Dispose() }
+        $banner.Save($BannerPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
+
+        # --- panel: dark band down the left with the icon on it, white where the text lands ---
+        $dialog = New-Object System.Drawing.Bitmap(493, 312, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+        $g = [System.Drawing.Graphics]::FromImage($dialog)
+        try {
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $g.Clear([System.Drawing.Color]::White)
+            # The same near-black the application's terminal uses, so the installer looks like
+            # the thing it installs.
+            $band = New-Object System.Drawing.Rectangle(0, 0, 164, 312)
+            $top = [System.Drawing.Color]::FromArgb(27, 27, 27)
+            $bottom = [System.Drawing.Color]::FromArgb(12, 12, 12)
+            $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush($band, $top, $bottom, 90.0)
+            try { $g.FillRectangle($brush, $band) } finally { $brush.Dispose() }
+            $g.DrawImage($icon, (New-Object System.Drawing.Rectangle(26, 100, 112, 112)))
+        } finally { $g.Dispose() }
+        $dialog.Save($DialogPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
+
+        foreach ($check in @(@{ Path = $BannerPath; W = 493; H = 58 },
+                             @{ Path = $DialogPath; W = 493; H = 312 })) {
+            $img = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $check.Path))
+            try {
+                if ($img.Width -ne $check.W -or $img.Height -ne $check.H) {
+                    throw "$($check.Path) is $($img.Width)x$($img.Height), WixUI requires $($check.W)x$($check.H)"
+                }
+            } finally { $img.Dispose() }
+        }
+        $banner.Dispose(); $dialog.Dispose()
+    } finally { $icon.Dispose() }
+
+    Write-Note "Installer artwork generated from $(Split-Path -Leaf $IconPath) (493x58 banner, 493x312 panel)"
+}
+
 # Build
 # ---------------------------------------------------------------------------------------
 
@@ -223,6 +339,14 @@ New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 $wixObj = Join-Path $objDir 'uniterm.wixobj'
 $msi = Join-Path $OutDir "UniTerm-$cargoVersion-x64.msi"
 
+$licenseRtf = Join-Path $objDir 'license.rtf'
+New-LicenseRtf -TextPath (Join-Path $RepoDir 'LICENSE') -RtfPath $licenseRtf
+
+$bannerBmp = Join-Path $objDir 'banner.bmp'
+$dialogBmp = Join-Path $objDir 'dialog.bmp'
+New-UiBitmaps -IconPath (Join-Path $RepoDir 'resources\icon.png') `
+              -BannerPath $bannerBmp -DialogPath $dialogBmp
+
 Write-Step 'Compiling installer authoring (candle)'
 Invoke-Tool -What 'candle' -Exe (Join-Path $wixBin 'candle.exe') -Arguments @(
     '-nologo'
@@ -230,6 +354,9 @@ Invoke-Tool -What 'candle' -Exe (Join-Path $wixBin 'candle.exe') -Arguments @(
     "-dVersion=$msiVersion"
     "-dBinDir=$BinDir"
     "-dRepoDir=$RepoDir"
+    "-dLicenseRtf=$licenseRtf"
+    "-dBannerBmp=$bannerBmp"
+    "-dDialogBmp=$dialogBmp"
     '-ext', 'WixUIExtension'
     '-ext', 'WixUtilExtension'
     '-out', $wixObj
