@@ -1,0 +1,18 @@
+# This repo is developed on Windows with core.autocrlf=true, so text files arrive in the
+# working tree with CRLF. That is harmless for Rust and for PowerShell, but not for files a
+# Linux tool reads as shell: snapcraft.yaml embeds a shell fragment in `override-pull`, and a
+# trailing CR turns the last argument of every line into something with a carriage return in
+# it. Building the snap from a Windows checkout through WSL hits this immediately.
+*.sh            text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.desktop       text eol=lf
+
+# PowerShell keeps CRLF: the installer scripts are only ever run on Windows.
+*.ps1           text eol=crlf
+
+# Belt and braces for the icons. Git detects these as binary on its own, but an explicit
+# marker means no future .gitattributes rule can accidentally mangle them.
+*.png           binary
+*.ico           binary
+*.icns          binary

@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  UniTerm MSI authoring (WiX v3).
+
+  Two decisions worth knowing about:
+
+  * **Per-user install.** `InstallScope="perUser"` puts the application under
+    %LOCALAPPDATA%\Programs and needs no elevation, so installing does not raise a UAC prompt at
+    all. The Tauri build installed per-machine, which is what the old README's "the installer
+    seems to hang before the UAC popup, this is normal" note was about. Nothing about a serial
+    terminal needs administrative rights.
+
+  * **A fixed UpgradeCode.** It must never change, or a new version would install alongside the
+    old one instead of replacing it. The ProductCode is regenerated per build (`Id="*"`), which
+    is what makes each version a distinct product that `MajorUpgrade` can supersede.
+
+  Values that change per build arrive as preprocessor variables from build.ps1:
+  $(var.Version), $(var.BinDir), $(var.RepoDir), $(var.LicenseRtf), $(var.BannerBmp),
+  $(var.DialogBmp).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="UniTerm"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Phil Spindler"
+           UpgradeCode="1EDECA12-0DF8-4099-9036-9ED139C78DB4">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             InstallPrivileges="limited"
+             Description="UniTerm - serial and SSH terminal"
+             Comments="Installs for the current user only; no administrator rights required." />
+
+    <!-- Replace an older version in place rather than installing beside it. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of UniTerm is already installed. Uninstall it first if you want to go back to this version." />
+
+    <!--
+      Detect the Tauri-era 1.x release, which used a different UpgradeCode and installed
+      per-machine into Program Files. Because it is a different product in a different install
+      context, this package cannot supersede it: the two would sit side by side with two Start
+      Menu entries.
+
+      This only records the fact (it lands in the MSI log and in the OLDUNITERMFOUND property)
+      rather than blocking or removing anything. Removing a per-machine product requires
+      elevation, which would defeat the point of a per-user install, and refusing to proceed
+      would be presumptuous for something that is merely untidy. The README tells users to
+      uninstall 1.x first; turning this into a hard block is a one-line `<Condition>` away if
+      that is preferred.
+    -->
+    <Upgrade Id="78B80344-AA3D-5091-870A-5ED98F039AC1">
+      <UpgradeVersion Minimum="0.0.0"
+                      IncludeMinimum="yes"
+                      OnlyDetect="yes"
+                      Property="OLDUNITERMFOUND" />
+    </Upgrade>
+
+    <!-- Single embedded cabinet, so the MSI is one self-contained file. -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Shown in Add/Remove Programs. The Id keeps the .ico extension because MSI validation
+         (ICE50) compares it against the shortcut it is used for. -->
+    <Icon Id="UniTerm.ico" SourceFile="$(var.RepoDir)\resources\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="UniTerm.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/aero530/uniterm" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!-- Offer to launch after a successful interactive install. `Return="ignore"` is required
+         for WixShellExec; `asyncNoWait` only applies to ExeCommand actions. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch UniTerm" />
+    <Property Id="WixShellExecTarget" Value="[#UniTermExe]" />
+    <CustomAction Id="LaunchUniTerm"
+                  BinaryKey="WixCA"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <!-- Per-user installs cannot write to Program Files, so the convention is
+           %LOCALAPPDATA%\Programs\<app>, which is where per-user MSIs and tools like VS Code go. -->
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="UniTerm" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <!--
+        One component for everything installed, keyed on an HKCU registry value.
+
+        A per-user component must use a registry key under HKCU as its keypath rather than a file
+        (MSI validation rule ICE38): the file lives in a profile MSI cannot inspect for other
+        users, so a per-user marker in the registry is what makes presence detectable.
+      -->
+      <Component Id="UniTermFiles" Guid="C6E5F1A8-3B7D-4A2E-9F44-1D0C8B5E7A93">
+        <RegistryValue Root="HKCU"
+                       Key="Software\UniTerm"
+                       Name="InstallFolder"
+                       Type="string"
+                       Value="[INSTALLFOLDER]"
+                       KeyPath="yes" />
+
+        <File Id="UniTermExe" Name="UniTerm.exe" Source="$(var.BinDir)\UniTerm.exe" />
+        <!-- Apache-2.0 requires the licence to travel with the distribution. -->
+        <File Id="LicenseTxt" Name="LICENSE.txt" Source="$(var.RepoDir)\LICENSE" />
+        <File Id="ReadmeMd" Name="README.md" Source="$(var.RepoDir)\README.md" />
+
+        <!-- A non-advertised shortcut. Advertised shortcuts trigger installer self-repair, which
+             a per-user application does not need, and they force the icon to match the
+             component's keypath file. -->
+        <Shortcut Id="StartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="UniTerm"
+                  Description="Serial and SSH terminal"
+                  Target="[#UniTermExe]"
+                  Icon="UniTerm.ico"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no" />
+
+        <!-- MSI removes the files it installed but not the directories holding them, which would
+             otherwise be left behind empty. Both levels are listed because validation (ICE64)
+             requires every profile directory the package creates to be cleaned up.
+             This is safe for the shared `Programs` parent: RemoveFolder deletes a directory only
+             when it is empty, so another application's folder there keeps it alive. -->
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Title="UniTerm" Level="1" Display="expand" AllowAdvertise="no">
+      <ComponentRef Id="UniTermFiles" />
+    </Feature>
+
+    <!-- A directory-choosing wizard. WixUI_Minimal would hide the location, which matters here
+         because a per-user path is not where people expect to look. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <!--
+      Without this, WixUI falls back to the placeholder License.rtf inside WixUIExtension and
+      the licence page reads "Lorem ipsum dolor sit amet". build.ps1 generates the file from
+      the repository's LICENSE, so the page shows the Apache-2.0 text the project is under and
+      cannot drift from it.
+    -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+
+    <!--
+      Likewise the artwork: left unset, WixUI uses its own bundled bitmaps. Both are rendered
+      from resources/icon.png by build.ps1, which also asserts the sizes WixUI requires - a
+      wrongly sized bitmap is not an error, it just renders badly.
+    -->
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.BannerBmp)" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.DialogBmp)" />
+
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <!-- Driven from the exit dialog rather than the execute sequence: the checkbox property is
+         set by the UI and is not available to the execute sequence, so a sequenced condition on
+         it would never be true. -->
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchUniTerm">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed
+      </Publish>
+    </UI>
+  </Product>
+</Wix>

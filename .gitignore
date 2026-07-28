@@ -2,12 +2,17 @@
 logs
 *.log
 
+# Rust build output
+/target/
 
+# snapcraft build output. It works in the project root, so these appear next to the source.
+/parts/
+/stage/
+/prime/
+*.snap
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 
-build/
-node_modules/
-.svelte-kit/
+.claude
