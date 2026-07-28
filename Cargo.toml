@@ -1,0 +1,58 @@
+[package]
+name = "uniterm"
+version = "3.0.0-dev"
+description = "Serial port terminal"
+authors = ["Phil Spindler"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.85"
+
+[[bin]]
+name = "UniTerm"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26"
+eframe = { version = "0.35", features = ["persistence"] }
+egui_dock = { version = "0.20", features = ["serde"] }
+rfd = "0.17"
+ron = "0.12"
+# `ring` rather than the default `aws-lc-rs` backend: aws-lc-sys is a C library that needs
+# CMake and NASM to build and fails outright on a stock Windows toolchain. `ring` keeps the
+# build pure-cargo. Pinned to a minor version because russh breaks API on every one.
+russh = { version = "0.62.4", default-features = false, features = [
+    "ring",
+    "flate2",
+    "rsa",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
+tokio-serial = "5.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Enumerating serial ports on Linux needs libudev. Without this feature `serialport` has no
+# Linux branch at all and `available_ports` returns "Not implemented for this OS", so the port
+# list comes back empty — on a serial terminal. Target-gated rather than enabled globally so
+# the Windows build stays pure cargo: the `libudev` crate is itself gated to Linux, and feature
+# resolver 2 keeps a target's features off every other target.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-serial = { version = "5.5", features = ["libudev"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 2
+strip = true
+
+[dev-dependencies]
+bytes = "1"

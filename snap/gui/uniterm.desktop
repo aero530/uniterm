@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=UniTerm
+GenericName=Serial Terminal
+Comment=Serial port and SSH terminal
+Exec=uniterm
+Icon=${SNAP}/meta/gui/uniterm.png
+Terminal=false
+Categories=Development;Utility;TerminalEmulator;
+Keywords=serial;com;tty;uart;rs232;ssh;terminal;console;
+StartupNotify=true
+# X11 matches a window to this entry by WM_CLASS; Wayland matches by app id, which snapd's
+# renamed copy of this file (uniterm_uniterm.desktop) has to agree with. See main::app_id.
+StartupWMClass=uniterm_uniterm
