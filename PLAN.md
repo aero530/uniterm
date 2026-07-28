@@ -3,9 +3,6 @@
 Planning document for six proposed features. Written against the tree at commit `6166a10`
 (Tauri 2.0-beta + SvelteKit 4, ~1,000 LOC Rust / ~900 LOC Svelte).
 
-> For the egui vs gpui framework decision behind Task 1, see
-> [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md).
-
 > **Status: all six tasks are implemented** on branch `feat/egui-port`. The estimates and
 > analysis below are kept as written, so they can be compared against what actually happened.
 > Corrections found during implementation:
@@ -17,8 +14,7 @@ Planning document for six proposed features. Written against the tree at commit 
 >   became `style_of(theme)`.
 > * **russh is not toolchain-free by default.** Its default `aws-lc-rs` backend needs CMake and
 >   NASM and does not build on a stock Windows toolchain; the `ring` backend does. This
->   contradicts the "pure Rust, no C bindings" claim in
->   [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md).
+>   contradicted the "pure Rust, no C bindings" assumption the framework choice was made on.
 > * **Saved state must not be JSON.** `DockState` holds `egui::Rect`s initialised to infinity,
 >   which JSON cannot represent; RON is required. This is why eframe uses RON internally.
 > * **SSH was testable after all.** Task 2's "no way to verify without a server" assumption was

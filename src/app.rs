@@ -222,9 +222,9 @@ impl UniTermApp {
         let now = recents::now_seconds();
 
         let label = if self.recents.is_empty() {
-            "Recent ▾".to_owned()
+            "Recent".to_owned()
         } else {
-            format!("Recent ({}) ▾", self.recents.len())
+            format!("Recent ({})", self.recents.len())
         };
         ui.menu_button(label, |ui| {
             if self.recents.is_empty() {
@@ -257,7 +257,7 @@ impl UniTermApp {
                         ui.close();
                     }
                     ui.weak(recents::relative_time(now, entry.last_used));
-                    if ui.small_button("✖").on_hover_text("Forget this one").clicked() {
+                    if ui.small_button("×").on_hover_text("Forget this one").clicked() {
                         to_remove = Some(identity.clone());
                     }
                 });
@@ -306,7 +306,7 @@ impl UniTermApp {
                 ui.add_space(48.0);
                 ui.heading("No open connections");
                 ui.add_space(4.0);
-                if ui.button("＋  New connection").clicked() {
+                if ui.button("+  New connection").clicked() {
                     new_tab = true;
                 }
                 ui.add_space(24.0);
@@ -410,6 +410,18 @@ impl eframe::App for UniTermApp {
         std::time::Duration::from_secs(10)
     }
 
+    /// Background for everything egui does not paint over.
+    ///
+    /// eframe's default is a hardcoded near-black that ignores the theme entirely, and the
+    /// `Ui` handed to [`eframe::App::ui`] has no background of its own — so in light mode
+    /// every uncovered region came out black. The most visible was the strip behind the tab
+    /// controls, where light widgets sat on a black background. eframe's own comment on the
+    /// default suggests `window_fill` as the natural alternative; `panel_fill` is the same
+    /// colour in both built-in themes and is what the toolbar already paints itself.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // Drain each session's task messages before drawing, so button states and any
         // errors reflect this frame.
@@ -418,6 +430,9 @@ impl eframe::App for UniTermApp {
         for session in self.sessions.values_mut() {
             if session.poll(&self.rt, ui.ctx()) {
                 established.push(session.settings.clone());
+                // Having just connected, the next thing the user wants is to type — most of
+                // all over SSH, where the shell is waiting for input.
+                session.focus_terminal = true;
             }
         }
         // Only connections that actually worked are worth remembering.
@@ -555,6 +570,16 @@ impl TabViewer for Viewer<'_> {
             })
             .inner;
 
+        // A connection that just came up claims the keyboard, so typing works without a
+        // click first. Only when nothing else holds focus: the user may well be part-way
+        // through typing in the send field or a settings box, and taking that away mid-word
+        // would be worse than making them click.
+        if std::mem::take(&mut session.focus_terminal) && ui.memory(|m| m.focused().is_none()) {
+            ui.memory_mut(|m| m.request_focus(view_id));
+            // Same one-frame filter hole `render::take_focus` covers.
+            ui.ctx().request_repaint();
+        }
+
         let controls = ui.scope(|ui| {
             ui.add_space(4.0);
             ui::controls(ui, session, self.ports, self.rt, tab.0);
@@ -599,5 +624,209 @@ impl TabViewer for Viewer<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{ConnectionKind, DisplayMode};
+
+    /// Every non-ASCII character the interface draws has to exist in the font actually used
+    /// to draw it, or it renders as a hollow replacement box.
+    ///
+    /// Not hypothetical: tab titles marked a live connection with U+25CF BLACK CIRCLE, the
+    /// toolbar had a U+25BE dropdown arrow and warnings a U+26A0 sign, and egui's bundled
+    /// proportional font has none of them - so the interface showed "\u{25a1} COM3" and every
+    /// screenshot recorded it. Labels use the proportional family, which is the one checked
+    /// here; the terminal grid is monospace but only ever renders bytes from the remote end,
+    /// which no font choice of ours can guarantee.
+    #[test]
+    fn every_glyph_the_ui_draws_exists_in_the_font() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for (glyph, used_for) in [
+            ('\u{00b7}', "separator in the status line"),
+            ('\u{00d7}', "forget-this-recent button"),
+            ('\u{2022}', "connected indicator in a tab title"),
+            ('\u{2026}', "ellipsis on buttons that open a dialog"),
+            ('\u{21bb}', "refresh ports"),
+            ('\u{25cb}', "connecting indicator in a tab title"),
+            ('\u{2605}', "pinned recent"),
+            ('\u{2606}', "unpinned recent"),
+            ] {
+                let present = ui
+                    .ctx()
+                    .fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(14.0), glyph));
+                assert!(
+                    present,
+                    "U+{:04X} ({used_for}) is missing from egui's proportional font and \
+                     will render as a box",
+                    glyph as u32
+                );
+            }
+        });
+    }
+
+
+    /// Drive one frame of the real dock, with the real tab viewer, headlessly.
+    ///
+    /// Worth the setup: the focus bugs this guards against were bugs of *composition*. Every
+    /// piece worked alone, so only something that renders the dock the way the app does can
+    /// show whether the terminal actually ends up holding the keyboard.
+    fn dock_frame(
+        ctx: &egui::Context,
+        dock: &mut DockState<TabId>,
+        sessions: &mut BTreeMap<TabId, Session>,
+        rt: &Handle,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let mut closed = Vec::new();
+            let mut added = Vec::new();
+            let mut viewer = Viewer {
+                sessions,
+                ports: &[],
+                rt,
+                closed: &mut closed,
+                added: &mut added,
+            };
+            DockArea::new(dock)
+                .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+                .show_inside(ui, &mut viewer);
+        });
+    }
+
+    fn ssh_tab() -> (DockState<TabId>, BTreeMap<TabId, Session>, TabId) {
+        let tab = TabId(1);
+        let mut session = Session::new(ConnectionSettings {
+            kind: ConnectionKind::Ssh,
+            ..Default::default()
+        });
+        // An SSH tab defaults to ANSI, which is the mode that could not be typed into.
+        assert_eq!(session.display_mode, DisplayMode::Ansi);
+        session.settings.ssh.host = "example.test".into();
+        let mut sessions = BTreeMap::new();
+        sessions.insert(tab, session);
+        (DockState::new(vec![tab]), sessions, tab)
+    }
+
+    fn click(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Clicking a docked ANSI terminal has to leave *that terminal* holding focus — not the
+    /// dock, not a control in the strip below it.
+    #[test]
+    fn clicking_a_docked_terminal_focuses_it() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = egui::Context::default();
+        let (mut dock, mut sessions, tab) = ssh_tab();
+        // Well inside the terminal: below the tab bar, above the controls strip.
+        let inside = egui::Pos2::new(450.0, 200.0);
+
+        dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+        dock_frame(
+            &ctx,
+            &mut dock,
+            &mut sessions,
+            rt.handle(),
+            vec![egui::Event::PointerMoved(inside)],
+        );
+        dock_frame(
+            &ctx,
+            &mut dock,
+            &mut sessions,
+            rt.handle(),
+            vec![click(inside, true)],
+        );
+        dock_frame(
+            &ctx,
+            &mut dock,
+            &mut sessions,
+            rt.handle(),
+            vec![click(inside, false)],
+        );
+
+        let expected = egui::Id::new(("terminal", tab.0));
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(expected),
+            "the terminal must hold focus after a click inside it"
+        );
+
+        // And it keeps it while the dock redraws around it.
+        for frame in 0..3 {
+            dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+            assert_eq!(
+                ctx.memory(|m| m.focused()),
+                Some(expected),
+                "focus lost {} frame(s) later — something in the dock took it",
+                frame + 1
+            );
+        }
+    }
+
+    /// A session that has just connected claims the keyboard, so an SSH tab can be typed into
+    /// without clicking it first.
+    #[test]
+    fn a_freshly_connected_session_takes_focus() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = egui::Context::default();
+        let (mut dock, mut sessions, tab) = ssh_tab();
+
+        dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), None);
+
+        // What `poll` returning "connected this frame" sets.
+        sessions.get_mut(&tab).unwrap().focus_terminal = true;
+        dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(egui::Id::new(("terminal", tab.0))),
+            "connecting must hand the keyboard to the terminal"
+        );
+        assert!(
+            !sessions[&tab].focus_terminal,
+            "the request must be consumed, not re-applied every frame"
+        );
+    }
+
+    /// ...but never out from under someone who is mid-word in a text field. Auto-connect on
+    /// startup and a reconnect can both land while the user is typing elsewhere.
+    #[test]
+    fn connecting_does_not_steal_focus_from_a_text_field() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = egui::Context::default();
+        let (mut dock, mut sessions, tab) = ssh_tab();
+
+        dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+
+        // Stand in for the send field, or any settings box, holding focus.
+        let elsewhere = egui::Id::new("some-text-field");
+        ctx.memory_mut(|m| m.request_focus(elsewhere));
+
+        sessions.get_mut(&tab).unwrap().focus_terminal = true;
+        dock_frame(&ctx, &mut dock, &mut sessions, rt.handle(), vec![]);
+
+        assert_ne!(
+            ctx.memory(|m| m.focused()),
+            Some(egui::Id::new(("terminal", tab.0))),
+            "connecting must not pull focus out of a field being typed into"
+        );
     }
 }

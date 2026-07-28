@@ -23,7 +23,7 @@ use eframe::egui::{
 };
 
 use super::emu::Emulator;
-use super::palette;
+use super::palette::Palette;
 use super::text;
 use super::TermBuffer;
 use crate::settings::DisplayMode;
@@ -64,14 +64,29 @@ fn lock_focus(ui: &mut Ui, id: Id) {
     });
 }
 
-fn view_frame(ui: &Ui, focused: bool) -> egui::Frame {
+/// Give a view keyboard focus, and make sure the frame that installs the lock filter
+/// actually happens.
+///
+/// `Memory::set_focus_lock_filter` is refused unless the widget already held focus on the
+/// previous frame, and `request_focus` installs a *default* filter. So for exactly one frame
+/// after a click, Tab, the arrows and Escape are still treated as focus navigation. egui only
+/// redraws in response to input, so that one frame is usually the frame carrying the user's
+/// first keystroke — click a terminal, press Up, and focus jumps to another widget instead of
+/// the arrow reaching the remote end. Forcing a repaint spends that frame immediately, while
+/// nobody is typing into it.
+fn take_focus(ui: &Ui, response: &egui::Response) {
+    response.request_focus();
+    ui.ctx().request_repaint();
+}
+
+fn view_frame(ui: &Ui, focused: bool, palette: &Palette) -> egui::Frame {
     let border = if focused {
         Stroke::new(2.0, FOCUS_BORDER)
     } else {
         Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
     };
     egui::Frame::default()
-        .fill(palette::BACKGROUND)
+        .fill(palette.background)
         .stroke(border)
         .inner_margin(4.0)
 }
@@ -168,7 +183,10 @@ pub fn grid_view(
         lock_focus(ui, id);
     }
 
-    let frame = view_frame(ui, has_focus);
+    // The terminal follows the application theme, so the palette is chosen per frame rather
+    // than baked in. Copying twenty colours is cheaper than any way of caching it.
+    let palette = Palette::for_theme(ui.visuals().dark_mode);
+    let frame = view_frame(ui, has_focus, &palette);
     let viewport_height = (height - frame.total_margin().sum().y).max(row_height);
 
     frame.show(ui, |ui| {
@@ -188,7 +206,14 @@ pub fn grid_view(
         };
         emu.resize(columns, rows);
 
-        let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
+        // Take the space, then interact with the id the *caller* gave us. Doing this in one
+        // step via `allocate_exact_size` looks tidier but hands back a response carrying an
+        // auto-generated id, and `request_focus` on that focuses something `has_focus(id)`
+        // above will never match — so click-to-focus silently did nothing and typing was
+        // never transmitted in ANSI mode. `buffer_view` gets this right by construction
+        // because it has to `interact` separately anyway.
+        let (_auto_id, rect) = ui.allocate_space(available);
+        let response = ui.interact(rect, id, Sense::click_and_drag());
         let geometry = Geometry {
             origin: rect.min,
             char_width,
@@ -199,11 +224,11 @@ pub fn grid_view(
 
         handle_scroll(ui, emu, &response, row_height);
         handle_selection(ui, emu, &response, geometry);
-        paint_grid(ui, emu, geometry, &font, has_focus);
+        paint_grid(ui, emu, geometry, &font, has_focus, &palette);
         scrollback_indicator(ui, emu, rect, rows);
 
         if response.clicked() {
-            response.request_focus();
+            take_focus(ui, &response);
         }
     });
 
@@ -267,7 +292,14 @@ fn handle_selection(ui: &Ui, emu: &mut Emulator, response: &egui::Response, geom
 ///
 /// `display_iter` yields cells in row-major order, so runs of same-styled cells can be
 /// emitted as they are walked, without collecting the grid into an intermediate buffer.
-fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focused: bool) {
+fn paint_grid(
+    ui: &Ui,
+    emu: &Emulator,
+    geometry: Geometry,
+    font: &FontId,
+    focused: bool,
+    palette: &Palette,
+) {
     let grid_rect = Rect::from_min_size(geometry.origin, geometry.size());
     let painter = ui.painter().with_clip_rect(grid_rect);
     let content = emu.term().renderable_content();
@@ -283,8 +315,8 @@ fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focuse
         start_column: 0,
         columns: 0,
         text: String::new(),
-        fg: palette::FOREGROUND,
-        bg: palette::BACKGROUND,
+        fg: palette.foreground,
+        bg: palette.background,
         flags: Flags::empty(),
     };
 
@@ -302,18 +334,25 @@ fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focuse
         let column = indexed.point.column.0;
         let wide = flags.contains(Flags::WIDE_CHAR);
 
-        let mut fg = palette::resolve_foreground(cell.fg, colors, flags.contains(Flags::BOLD));
-        let mut bg = palette::resolve(cell.bg, colors);
+        let mut fg = palette.resolve_foreground(cell.fg, colors, flags.contains(Flags::BOLD));
+        let mut bg = palette.resolve(cell.bg, colors);
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
         if selection.is_some_and(|range| range.contains(indexed.point)) {
-            bg = palette::SELECTION;
+            bg = palette.selection;
         }
         if flags.contains(Flags::HIDDEN) {
+            // Deliberately invisible, so this is the one case the contrast floor below must
+            // not "rescue".
             fg = bg;
-        } else if flags.contains(Flags::DIM) {
-            fg = fg.gamma_multiply(0.66);
+        } else {
+            if flags.contains(Flags::DIM) {
+                fg = palette.dim(fg);
+            }
+            // Now that both halves of the cell are known, make sure the text can be seen on
+            // the background it actually landed on.
+            fg = palette.readable(fg, bg);
         }
 
         // A run holds cells that share style, sit on one line and are all single width.
@@ -326,7 +365,7 @@ fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focuse
             && run.columns > 0;
 
         if !continues {
-            flush_run(&painter, &run, geometry, font);
+            flush_run(&painter, &run, geometry, font, palette);
             run.reset(line, column, fg, bg, flags);
         }
 
@@ -335,12 +374,12 @@ fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focuse
 
         // A wide glyph is always its own run so column arithmetic stays exact.
         if wide {
-            flush_run(&painter, &run, geometry, font);
+            flush_run(&painter, &run, geometry, font, palette);
             run.columns = 0;
             run.text.clear();
         }
     }
-    flush_run(&painter, &run, geometry, font);
+    flush_run(&painter, &run, geometry, font, palette);
 
     // Cursor last, so it sits above the cell it occupies.
     if show_cursor && cursor_shape != CursorShape::Hidden {
@@ -353,6 +392,7 @@ fn paint_grid(ui: &Ui, emu: &Emulator, geometry: Geometry, font: &FontId, focuse
                 cursor_point.column.0,
                 cursor_shape,
                 focused,
+                palette,
             );
         }
     }
@@ -370,13 +410,19 @@ fn style_flags(flags: Flags) -> Flags {
             | Flags::ALL_UNDERLINES)
 }
 
-fn flush_run(painter: &egui::Painter, run: &Run, geometry: Geometry, font: &FontId) {
+fn flush_run(
+    painter: &egui::Painter,
+    run: &Run,
+    geometry: Geometry,
+    font: &FontId,
+    palette: &Palette,
+) {
     if run.columns == 0 || run.text.is_empty() {
         return;
     }
     let cell_rect = geometry.span(run.line, run.start_column, run.columns);
 
-    if run.bg != palette::BACKGROUND {
+    if run.bg != palette.background {
         painter.rect_filled(cell_rect, 0.0, run.bg);
     }
 
@@ -418,6 +464,7 @@ fn paint_cursor(
     column: usize,
     shape: CursorShape,
     focused: bool,
+    palette: &Palette,
 ) {
     let cell = geometry.cell(line, column);
     let (char_width, row_height) = (geometry.char_width, geometry.row_height);
@@ -427,7 +474,7 @@ fn paint_cursor(
         painter.rect_stroke(
             cell,
             0.0,
-            Stroke::new(1.0, palette::CURSOR),
+            Stroke::new(1.0, palette.cursor),
             egui::StrokeKind::Inside,
         );
         return;
@@ -435,13 +482,13 @@ fn paint_cursor(
 
     match shape {
         CursorShape::Block => {
-            painter.rect_filled(cell, 0.0, palette::CURSOR);
+            painter.rect_filled(cell, 0.0, palette.cursor);
         }
         CursorShape::HollowBlock => {
             painter.rect_stroke(
                 cell,
                 0.0,
-                Stroke::new(1.0, palette::CURSOR),
+                Stroke::new(1.0, palette.cursor),
                 egui::StrokeKind::Inside,
             );
         }
@@ -449,7 +496,7 @@ fn paint_cursor(
             painter.rect_filled(
                 Rect::from_min_size(cell.left_top(), Vec2::new(2.0, row_height)),
                 0.0,
-                palette::CURSOR,
+                palette.cursor,
             );
         }
         CursorShape::Underline => {
@@ -459,7 +506,7 @@ fn paint_cursor(
                     Vec2::new(char_width, 2.0),
                 ),
                 0.0,
-                palette::CURSOR,
+                palette.cursor,
             );
         }
         CursorShape::Hidden => {}
@@ -529,11 +576,12 @@ pub fn buffer_view(
         lock_focus(ui, id);
     }
 
-    let frame = view_frame(ui, has_focus);
+    let palette = Palette::for_theme(ui.visuals().dark_mode);
+    let frame = view_frame(ui, has_focus, &palette);
     let viewport_height = (height - frame.total_margin().sum().y).max(row_height);
 
     let inner = frame.show(ui, |ui| {
-        ui.style_mut().visuals.override_text_color = Some(palette::FOREGROUND);
+        ui.style_mut().visuals.override_text_color = Some(palette.foreground);
         ui.spacing_mut().item_spacing.y = 0.0;
         let available_width = ui.available_width();
 
@@ -550,13 +598,14 @@ pub fn buffer_view(
                 |ui, rows| {
                     for row in rows {
                         let job = match mode {
-                            DisplayMode::Ascii => text_row(buffer, row, &font),
+                            DisplayMode::Ascii => text_row(buffer, row, &font, &palette),
                             _ => byte_row(
                                 buffer,
                                 row,
                                 mode,
                                 &font,
                                 bytes_per_row(mode, available_width, char_width),
+                                &palette,
                             ),
                         };
                         ui.add(
@@ -571,7 +620,7 @@ pub fn buffer_view(
 
     let click = ui.interact(inner.response.rect, id, Sense::click());
     if click.clicked() {
-        click.request_focus();
+        take_focus(ui, &click);
     }
 
     TerminalResponse {
@@ -606,10 +655,10 @@ fn bytes_per_row(mode: DisplayMode, width: f32, char_width: f32) -> usize {
     ((width / cell).floor() as usize).clamp(1, MAX_BYTES_PER_ROW)
 }
 
-fn plain_format(font: &FontId) -> TextFormat {
+fn plain_format(font: &FontId, palette: &Palette) -> TextFormat {
     TextFormat {
         font_id: font.clone(),
-        color: palette::FOREGROUND,
+        color: palette.foreground,
         ..Default::default()
     }
 }
@@ -620,10 +669,10 @@ fn new_job() -> LayoutJob {
     job
 }
 
-fn text_row(buffer: &TermBuffer, row: usize, font: &FontId) -> LayoutJob {
+fn text_row(buffer: &TermBuffer, row: usize, font: &FontId, palette: &Palette) -> LayoutJob {
     let mut job = new_job();
     if let Some(bytes) = buffer.line(row) {
-        job.append(&text::visible(bytes), 0.0, plain_format(font));
+        job.append(&text::visible(bytes), 0.0, plain_format(font, palette));
     }
     job
 }
@@ -634,6 +683,7 @@ fn byte_row(
     mode: DisplayMode,
     font: &FontId,
     per_row: usize,
+    palette: &Palette,
 ) -> LayoutJob {
     let mut job = new_job();
     let bytes = buffer.bytes();
@@ -650,7 +700,7 @@ fn byte_row(
             _ => out.push_str(&format!("{byte:#04x} ")),
         }
     }
-    job.append(&out, 0.0, plain_format(font));
+    job.append(&out, 0.0, plain_format(font, palette));
     job
 }
 
@@ -685,6 +735,148 @@ pub fn plain_text(buffer: &TermBuffer, mode: DisplayMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::emu::TermSize;
+
+    /// Drive one headless frame containing only a grid view, and report whether it came out
+    /// of the frame holding keyboard focus.
+    fn grid_frame(
+        ctx: &egui::Context,
+        emu: &mut Emulator,
+        id: Id,
+        events: Vec<egui::Event>,
+    ) -> bool {
+        grid_frame_out(ctx, emu, id, events).0
+    }
+
+    /// As `grid_frame`, but also reports whether the frame asked to be redrawn.
+    fn grid_frame_out(
+        ctx: &egui::Context,
+        emu: &mut Emulator,
+        id: Id,
+        events: Vec<egui::Event>,
+    ) -> (bool, bool) {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut focused = false;
+        // `run_ui` hands over a root `Ui`, which is the same shape `eframe::App::ui` gets in
+        // egui 0.35 — so this exercises the view the way the app really calls it.
+        // The tessellated output is irrelevant; the frame is run for what it does to focus.
+        let _ = ctx.run_ui(input, |ui| {
+            focused = grid_view(ui, id, emu, 12.0, 400.0).focused;
+        });
+        (focused, ctx.has_requested_repaint())
+    }
+
+    fn press(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Clicking the ANSI grid has to give it keyboard focus, because `app.rs` transmits
+    /// typing only while `TerminalResponse::focused` is set. This regressed once already:
+    /// the view allocated its rect with `allocate_exact_size`, whose response carries an
+    /// auto-generated id, so `request_focus` focused an id that the `has_focus(id)` check
+    /// never looked at. Typing in ANSI mode went nowhere, which for SSH means the whole
+    /// session is unusable.
+    #[test]
+    fn clicking_the_grid_takes_keyboard_focus() {
+        let ctx = egui::Context::default();
+        let mut emu = Emulator::new(TermSize::new(80, 24, 1000));
+        let id = Id::new("grid-focus-test");
+        let inside = Pos2::new(100.0, 100.0);
+
+        // First frame registers the widget rect; egui resolves interaction against the
+        // rects it saw last frame, so a click cannot land before this.
+        assert!(
+            !grid_frame(&ctx, &mut emu, id, vec![]),
+            "a freshly drawn grid should not have focus"
+        );
+
+        grid_frame(&ctx, &mut emu, id, vec![egui::Event::PointerMoved(inside)]);
+        grid_frame(&ctx, &mut emu, id, vec![press(inside, true)]);
+        let focused = grid_frame(&ctx, &mut emu, id, vec![press(inside, false)]);
+
+        assert!(focused, "clicking the grid must focus it so typing is sent");
+    }
+
+    /// Focus has to persist across frames, not just the frame the click landed in —
+    /// otherwise only the first keystroke after every click would be transmitted.
+    #[test]
+    fn grid_focus_survives_later_frames() {
+        let ctx = egui::Context::default();
+        let mut emu = Emulator::new(TermSize::new(80, 24, 1000));
+        let id = Id::new("grid-focus-persist");
+        let inside = Pos2::new(100.0, 100.0);
+
+        grid_frame(&ctx, &mut emu, id, vec![]);
+        grid_frame(&ctx, &mut emu, id, vec![egui::Event::PointerMoved(inside)]);
+        grid_frame(&ctx, &mut emu, id, vec![press(inside, true)]);
+        grid_frame(&ctx, &mut emu, id, vec![press(inside, false)]);
+
+        for frame in 0..3 {
+            assert!(
+                grid_frame(&ctx, &mut emu, id, vec![]),
+                "focus lost {} frame(s) after the click",
+                frame + 1
+            );
+        }
+    }
+
+    /// Tab, the arrows and Escape are data for the remote end, so egui must not treat them
+    /// as focus navigation while the grid is focused.
+    ///
+    /// The filter that arranges this cannot be installed on the frame the click lands in —
+    /// see `take_focus` — so this also pins the requested repaint that spends the unprotected
+    /// frame before the user can type into it.
+    #[test]
+    fn focused_grid_keeps_focus_for_navigation_keys() {
+        for key in [
+            egui::Key::Tab,
+            egui::Key::ArrowUp,
+            egui::Key::ArrowDown,
+            egui::Key::ArrowLeft,
+            egui::Key::ArrowRight,
+            egui::Key::Escape,
+        ] {
+            let ctx = egui::Context::default();
+            let mut emu = Emulator::new(TermSize::new(80, 24, 1000));
+            let id = Id::new("grid-focus-nav");
+            let inside = Pos2::new(100.0, 100.0);
+
+            grid_frame(&ctx, &mut emu, id, vec![]);
+            grid_frame(&ctx, &mut emu, id, vec![egui::Event::PointerMoved(inside)]);
+            grid_frame(&ctx, &mut emu, id, vec![press(inside, true)]);
+            let (focused, repaint) = grid_frame_out(&ctx, &mut emu, id, vec![press(inside, false)]);
+            assert!(focused, "clicking the grid must focus it");
+            assert!(
+                repaint,
+                "taking focus must request the frame that installs the focus lock filter"
+            );
+
+            // The frame that repaint request pays for. Without it this would be the frame
+            // carrying the keystroke below, and focus would escape.
+            assert!(grid_frame(&ctx, &mut emu, id, vec![]));
+
+            let event = egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            };
+            assert!(
+                grid_frame(&ctx, &mut emu, id, vec![event]),
+                "{key:?} must not steal focus from a focused terminal"
+            );
+        }
+    }
 
     #[test]
     fn bytes_per_row_scales_with_width_and_is_never_zero() {

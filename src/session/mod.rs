@@ -157,6 +157,12 @@ pub struct Session {
     pub font_size: f32,
     /// Measured height of the controls strip, fed back each frame to lay out the tab.
     pub controls_height: f32,
+    /// Give the terminal view keyboard focus the next time this tab is drawn.
+    ///
+    /// Set when a connection is established: having just connected, the next thing you want
+    /// is to type. Consumed by the tab viewer rather than acted on here, because focus only
+    /// makes sense for a tab that is actually visible, and only the viewer knows that.
+    pub focus_terminal: bool,
 
     commands: Option<mpsc::UnboundedSender<Command>>,
     events: Option<mpsc::UnboundedReceiver<Event>>,
@@ -196,6 +202,7 @@ impl Session {
             enter_crlf: true,
             font_size: 13.0,
             controls_height: 150.0,
+            focus_terminal: false,
             commands: None,
             events: None,
         }
@@ -205,8 +212,8 @@ impl Session {
     pub fn title(&self) -> String {
         let name = self.settings.label();
         match self.state {
-            ConnectionState::Connected => format!("● {name}"),
-            ConnectionState::Connecting | ConnectionState::Reconnecting => format!("◌ {name}"),
+            ConnectionState::Connected => format!("• {name}"),
+            ConnectionState::Connecting | ConnectionState::Reconnecting => format!("○ {name}"),
             ConnectionState::Disconnected => name,
         }
     }
@@ -856,12 +863,12 @@ mod tests {
         let mut serial = serial_session();
         assert_eq!(serial.title(), "COM9");
         serial.state = ConnectionState::Connected;
-        assert_eq!(serial.title(), "● COM9");
+        assert_eq!(serial.title(), "• COM9");
 
         let mut ssh = ssh_session();
         assert_eq!(ssh.title(), "phil@srv");
         ssh.state = ConnectionState::Connecting;
-        assert_eq!(ssh.title(), "◌ phil@srv");
+        assert_eq!(ssh.title(), "○ phil@srv");
     }
 
     #[test]

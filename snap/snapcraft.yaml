@@ -1,0 +1,135 @@
+name: uniterm
+title: UniTerm
+base: core24
+adopt-info: uniterm
+summary: Serial port and SSH terminal
+description: |
+  A native serial terminal with dockable, splittable panes.
+
+  Serial and SSH connections live in the same window, a tab at a time. SSH gets a real PTY,
+  host keys verified against a known_hosts file, and a reconnect that keeps everything already
+  on screen. Received data can be shown as a full ANSI terminal screen or as raw ASCII,
+  decimal or hex.
+
+  **Serial ports need a manual connection.** Snaps get no access to serial devices by default:
+
+      sudo snap connect uniterm:serial-port
+
+  and see the README for the hotplug setting USB adapters need.
+
+license: Apache-2.0
+website: https://github.com/aero530/uniterm
+source-code: https://github.com/aero530/uniterm
+issues: https://github.com/aero530/uniterm/issues
+contact: https://github.com/aero530/uniterm/issues
+
+# Strict, not classic. Classic confinement needs a manual review for every upload and is only
+# justified when an app genuinely has to reach the whole filesystem; a terminal does not.
+confinement: strict
+grade: stable
+
+platforms:
+  amd64:
+  arm64:
+
+# The library linter reports every staged library as unused, because nothing *links* them:
+# winit, wgpu and rfd load the display stack by name at run time. A dlopen is invisible to
+# the linter, so these are false positives rather than dead weight, and dropping the
+# libraries would leave the app to find them on the host or not at all.
+#
+# Disabled wholesale rather than per-file: silencing one entry only promotes its transitive
+# dependencies to "unused" in the next run (ignoring libXcursor made libXrender unused, and
+# so on), so a file list here would need revisiting on every dependency change without ever
+# saying anything true.
+lint:
+  ignore:
+    - library
+
+parts:
+  # Ubuntu 24.04 ships rustc 1.75 and Cargo.toml needs 1.85, so the toolchain comes from
+  # rustup rather than the archive.
+  #
+  # Installed here rather than by the plugin's `rust-channel`, which pulls the `rustup` *snap*
+  # as a build-snap. That snap installs correctly but the plugin cannot see it: craft-parts
+  # validates the toolchain by running `rustup dump-testament` in a bash shell that inherits
+  # snapcraft's own environment, and snapcraft is a classic snap whose PATH does not include
+  # /snap/bin — so the check fails with "'rustup' not found" while `rustup` works fine one
+  # shell up. `rust-deps` is the escape hatch craft-parts names in that error, and it also
+  # keeps the build from depending on a classic snap working inside the build container.
+  rust-deps:
+    plugin: nil
+    build-packages:
+      - curl
+      - ca-certificates
+    override-build: |
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs         | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      craftctl default
+
+  uniterm:
+    after: [rust-deps]
+    plugin: rust
+    source: .
+    # Explicitly "none" so the plugin neither pulls the rustup snap nor tries to drive rustup
+    # itself; rust-deps has already put the toolchain in $HOME/.cargo/bin, which the plugin
+    # adds to PATH for the build. The minimum version is enforced by rust-version in
+    # Cargo.toml, so a toolchain that is too old fails with a clear message rather than a
+    # confusing compile error.
+    rust-channel: none
+    # Verified by building the crate on Ubuntu in WSL: with only these two present the build
+    # completes. Nothing else is needed because winit and wgpu reach the display stack through
+    # dlopen (`wayland-sys/dlopen`, `xkbcommon-dl`, `x11rb/libloading`), so those libraries are
+    # a run-time dependency rather than a build one.
+    build-packages:
+      - pkg-config
+      # Serial port enumeration. Without it the build fails outright in libudev-sys, and
+      # without the matching cargo feature the port list is silently empty; see Cargo.toml.
+      - libudev-dev
+    # `objdump -p` on the release binary shows exactly one external NEEDED entry, libudev.so.1;
+    # everything else it touches is opened by name at run time and found with `strings`.
+    #
+    # This is only the part of that set nothing else supplies. libX11, libX11-xcb, libxcb,
+    # libwayland-client, libwayland-egl and libXfixes all come from the mesa-2404 content
+    # snap, and listing them here achieves nothing: the extension's `gpu-2404-cleanup` step
+    # deletes them again at prime time so the app cannot end up with a second copy of the
+    # graphics stack. libEGL and libvulkan come from there too. Verified by unsquashfs on
+    # mesa-2404 and on the built snap.
+    stage-packages:
+      - libudev1
+      - libdbus-1-3
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libxcursor1   # pulls in libXrender and, via mesa-2404, needs libXfixes
+      - libxi6
+    override-pull: |
+      craftctl default
+      # Keep the snap version tied to Cargo.toml so there is one place to bump. A `-dev`
+      # suffix is kept here, unlike the MSI, because snap versions are free-form strings.
+      version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+      craftctl set version="$version"
+
+apps:
+  uniterm:
+    # Capitalised: Cargo.toml declares `[[bin]] name = "UniTerm"`, so that is what
+    # `cargo install` puts in bin/.
+    command: bin/UniTerm
+    # The gnome extension supplies mesa, fonts, themes, the XDG portal wiring and the GTK
+    # runtime, and auto-connects desktop, wayland, x11 and opengl. Hand-rolling that for a
+    # wgpu/winit app means shipping graphics drivers in the snap, which is worse.
+    extensions: [gnome]
+    plugs:
+      # Log files, and private keys the user points at.
+      - home
+      - removable-media
+      # SSH.
+      - network
+      # Serial devices. Not auto-connected: see the description.
+      - serial-port
+      # Reading /sys to work out which USB adapter a port belongs to. Without it ports still
+      # appear, but with no product or serial number, so a replugged adapter cannot be
+      # followed to its new port number.
+      - hardware-observe
+    environment:
+      # A strict snap cannot see ~/.ssh: the home interface excludes hidden directories, and
+      # ssh-keys is read-only so trust-on-first-use could not record anything anyway. Keep the
+      # store somewhere writable that survives a refresh. See knownhosts::default_path.
+      UNITERM_KNOWN_HOSTS: $SNAP_USER_COMMON/known_hosts

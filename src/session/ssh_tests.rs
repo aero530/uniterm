@@ -731,3 +731,137 @@ async fn read_until(transport: &mut super::transport::Transport, want: usize) ->
     }
     out
 }
+
+/// Typing into the terminal has to reach the remote shell — the whole point of an SSH tab.
+///
+/// This drives the real path end to end: a real egui frame renders the ANSI grid, a real click
+/// focuses it, real key events are encoded exactly as `app.rs` encodes them, and the bytes are
+/// asserted at a real SSH server. It exists because that path was broken in a way none of the
+/// unit tests could see: the grid allocated its rect with `allocate_exact_size`, so
+/// `request_focus` targeted an auto-generated id while the focus check looked at the caller's
+/// id, and `TerminalResponse::focused` was never true. Every layer worked; the composition did
+/// not.
+#[tokio::test]
+async fn typing_into_a_focused_terminal_reaches_the_server() {
+    use crate::term::input;
+    use eframe::egui;
+
+    let (port, observed) = start_server().await;
+    let store = temp_known_hosts("typing_e2e");
+    let ctx = egui::Context::default();
+    let handle = tokio::runtime::Handle::current();
+    let mut session = ssh_session(port, &store);
+
+    // ANSI mode is what an SSH tab defaults to, and is where the bug lived.
+    assert_eq!(session.display_mode, crate::settings::DisplayMode::Ansi);
+
+    session.connect(&handle, &ctx);
+    poll_until(&mut session, &ctx, "the connection", |s| s.is_connected()).await;
+
+    let view_id = egui::Id::new("typing-e2e-view");
+    let inside = egui::Pos2::new(100.0, 100.0);
+
+    // Render, click, and type — one closure per frame, mirroring `Viewer::ui`: draw the grid,
+    // then transmit if it holds focus.
+    let frame = |session: &mut crate::session::Session, events: Vec<egui::Event>| -> bool {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        // `Viewer::ui` does this before drawing: ANSI mode builds its screen lazily.
+        session.sync_emulator();
+        let mut focused = false;
+        let _ = ctx.run_ui(input, |ui| {
+            let font_size = session.font_size;
+            let emulator = session.emulator_mut().expect("ANSI mode has an emulator");
+            focused = crate::term::render::grid_view(ui, view_id, emulator, font_size, 400.0)
+                .focused;
+            if focused {
+                let events = ui.input(|i| i.events.clone());
+                let modes = session.input_modes();
+                let bytes = input::encode_events(&events, session.enter_crlf, modes);
+                if !bytes.is_empty() && session.is_connected() {
+                    session.send(bytes);
+                }
+            }
+        });
+        focused
+    };
+
+    fn click(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    frame(&mut session, vec![]);
+    frame(&mut session, vec![egui::Event::PointerMoved(inside)]);
+    frame(&mut session, vec![click(inside, true)]);
+    assert!(
+        frame(&mut session, vec![click(inside, false)]),
+        "clicking the ANSI grid must focus it, or typing is never transmitted"
+    );
+    frame(&mut session, vec![]);
+
+    // Ordinary printable text.
+    frame(&mut session, vec![egui::Event::Text("hi".into())]);
+    // Return, and a control combination, which take the key-event path rather than Text.
+    frame(
+        &mut session,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    frame(
+        &mut session,
+        vec![egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        }],
+    );
+
+    wait_for(&observed, |o| o.received.windows(2).any(|w| w == b"hi")).await;
+    wait_for(&observed, |o| o.received.contains(&0x03)).await;
+    let received = observed.lock().unwrap().received.clone();
+    assert!(
+        received.contains(&b'\r'),
+        "Return must be transmitted; got {received:?}"
+    );
+
+    // And the round trip lands back on the emulator's screen, uppercased by the test server.
+    // Hand-rolled rather than `poll_until` because the screen only advances when the frame
+    // syncs the emulator, which needs `&mut`.
+    let mut echoed = false;
+    for _ in 0..600 {
+        session.poll(&handle, &ctx);
+        session.sync_emulator();
+        if session
+            .emulator()
+            .map(|e| e.all_text().contains("HI"))
+            .unwrap_or(false)
+        {
+            echoed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        echoed,
+        "the echoed reply must reach the screen; got {:?}",
+        session.emulator().map(|e| e.all_text())
+    );
+}

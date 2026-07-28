@@ -38,8 +38,27 @@ pub enum Trust {
 }
 
 /// The user's `known_hosts` file.
+///
+/// `UNITERM_KNOWN_HOSTS` overrides the location. That exists for confined packaging: a strict
+/// snap cannot reach `~/.ssh` at all — the `home` interface deliberately excludes hidden
+/// directories, and the read-only `ssh-keys` interface could not record a newly trusted host
+/// even if it were connected. Rather than fail every SSH connection, the snap points this at
+/// its own writable area and gives up interoperating with OpenSSH's file, which is the honest
+/// trade and is documented as such.
 pub fn default_path() -> Option<PathBuf> {
-    dirs_home().map(|home| home.join(".ssh").join("known_hosts"))
+    resolve_path(std::env::var_os("UNITERM_KNOWN_HOSTS"), dirs_home())
+}
+
+/// The choice itself, split out so it can be tested without touching the environment.
+fn resolve_path(override_var: Option<std::ffi::OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(explicit) = override_var {
+        let path = PathBuf::from(explicit);
+        // An empty variable means "unset" rather than "the current directory".
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+    home.map(|home| home.join(".ssh").join("known_hosts"))
 }
 
 /// Home directory, without pulling in a crate for it.
@@ -153,6 +172,35 @@ impl Rejection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_hosts_defaults_to_the_openssh_file() {
+        let home = PathBuf::from("/home/phil");
+        let path = resolve_path(None, Some(home.clone())).unwrap();
+        assert_eq!(path, home.join(".ssh").join("known_hosts"));
+    }
+
+    /// Confined packaging needs the store somewhere reachable; see `default_path`.
+    #[test]
+    fn known_hosts_can_be_relocated() {
+        let path = resolve_path(Some("/var/snap/uniterm/common/known_hosts".into()), None);
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/var/snap/uniterm/common/known_hosts"))
+        );
+        // The override wins even when a home directory is available.
+        let path = resolve_path(Some("/elsewhere/kh".into()), Some(PathBuf::from("/home/phil")));
+        assert_eq!(path, Some(PathBuf::from("/elsewhere/kh")));
+    }
+
+    #[test]
+    fn an_empty_override_is_ignored_rather_than_meaning_the_cwd() {
+        let home = PathBuf::from("/home/phil");
+        let path = resolve_path(Some("".into()), Some(home.clone()));
+        assert_eq!(path, Some(home.join(".ssh").join("known_hosts")));
+        // With no home either, there is simply no store.
+        assert_eq!(resolve_path(Some("".into()), None), None);
+    }
 
     /// Fixed key material, so tests need no RNG and are deterministic.
     const ED25519_A: &str =

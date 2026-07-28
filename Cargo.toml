@@ -39,6 +39,14 @@ tokio-serial = "5.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Enumerating serial ports on Linux needs libudev. Without this feature `serialport` has no
+# Linux branch at all and `available_ports` returns "Not implemented for this OS", so the port
+# list comes back empty — on a serial terminal. Target-gated rather than enabled globally so
+# the Windows build stays pure cargo: the `libudev` crate is itself gated to Linux, and feature
+# resolver 2 keeps a target's features off every other target.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-serial = { version = "5.5", features = ["libudev"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 

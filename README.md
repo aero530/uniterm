@@ -31,6 +31,12 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
   Alacritty ships. Cursor addressing, erase, scroll regions, the alternate screen buffer,
   wide characters, reflow on resize, and base / bright / 256-colour / 24-bit colour, plus
   bold, dim, italic, underline, strikethrough and reverse video.
+* **Light and dark themes**, applied to the whole window including the terminal screen. The
+  sixteen ANSI colours are deliberately *not* re-themed — a program asking for slot 7 means
+  white, and a status bar drawn as white-background/black-text has to keep working — so
+  instead each cell's text is checked against the background it actually landed on and nudged
+  only if it would be invisible. That fixes black text on the dark theme too, which used to
+  disappear entirely.
 * Display received data as
   * ANSI — a real terminal screen
   * ASCII text — the raw view, with control bytes shown as caret notation (`^[`, `^C`, `^?`)
@@ -39,7 +45,9 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
 * Send data as ASCII text, decimal values or hex values, with optional CR / LF
 * Type directly into the terminal to transmit in real time: arrow keys, function keys,
   control combinations (Ctrl+C sends `0x03`), application-cursor-key mode and bracketed
-  paste
+  paste. A terminal takes the keyboard when you click it, or as soon as it connects, and
+  shows a red border while it has it — so you can see where your typing is going. Tab, the
+  arrows and Escape go to the remote end rather than moving between controls.
 * Select with the mouse and copy (Ctrl+Shift+C); Alt-drag for a rectangular selection
 * Scroll back through history with the wheel, Shift+PageUp/PageDown, or the indicator on the
   right edge
@@ -49,7 +57,26 @@ A native serial terminal built with [egui](https://github.com/emilk/egui) and
 * Manage multiple port connections
 * Notices an unplugged adapter and reports why a connection dropped
 
+## Screenshots
+
+A real terminal screen: the sixteen ANSI colours, the 256-colour cube, the greyscale ramp,
+24-bit colour, and every text attribute the emulator supports.
+
+![ansi](images/ansi.png)
+
+Serial and SSH side by side. Drag a tab header to split the view; each pane keeps its own
+connection settings, display mode and scrollback.
+
+![split_screen](images/split2.png)
+
+Click a terminal and type — keystrokes go straight down the wire. The red border shows which
+pane holds the keyboard.
+
+![realtime](images/realtime.png)
+
 ## Install
+
+### Windows
 
 Download the `.msi` from [releases](https://github.com/aero530/uniterm/releases) and run it.
 
@@ -67,6 +94,36 @@ msiexec /i UniTerm-3.0.0-x64.msi /qn
 > as far as Windows Installer is concerned, so this package will not replace it — you would end up
 > with both and two Start Menu entries. Uninstall the old UniTerm first.
 
+### Linux
+
+Download the `.snap` from [releases](https://github.com/aero530/uniterm/releases):
+
+```bash
+sudo snap install --dangerous ./uniterm_3.0.0-dev_amd64.snap
+sudo snap connect uniterm:serial-port
+sudo snap connect uniterm:hardware-observe
+```
+
+`--dangerous` is needed only because the release snaps are not signed by the store.
+
+**Both `snap connect` lines matter.** A snap gets no access to serial devices at all until
+`serial-port` is connected, and without `hardware-observe` ports appear with no product or
+serial number — which is also what lets a replugged USB adapter be followed to its new port
+number. Neither can be connected automatically: `serial-port` is a hardware interface, and
+auto-connection is a permission granted per-snap by the store.
+
+If a USB adapter still does not appear after connecting, snapd has to be told to create slots
+for hotplugged devices:
+
+```bash
+sudo snap set system experimental.hotplug=true
+sudo systemctl restart snapd
+sudo snap connect uniterm:serial-port
+```
+
+Built-in (non-USB) ports such as `/dev/ttyS0` are provided by the gadget on Ubuntu Core and are
+not available to a snap on a classic desktop at all. Run from source if you need those.
+
 ## Roadmap
 
 The six features planned in [PLAN.md](PLAN.md) are all built. What is left from that work:
@@ -74,9 +131,7 @@ The six features planned in [PLAN.md](PLAN.md) are all built. What is left from 
 * ssh-agent authentication, and optional credential storage in the OS keychain
 * An embedded font covering CJK and emoji
 * A signed installer (the MSI builds, but releases are unsigned)
-* macOS and Linux packaging — the installer builder is Windows-only
-
-[FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md) records why egui was chosen over gpui.
+* macOS packaging — there is a Windows MSI and a Linux snap, but nothing for macOS
 
 ### Current limitations
 
@@ -105,6 +160,22 @@ The six features planned in [PLAN.md](PLAN.md) are all built. What is left from 
   megabytes; only tab definitions and layout are written.
 * **State is written on close and every 10 seconds.** A crash or a kill loses changes since the
   last autosave, because `eframe` cannot be asked to save on demand.
+* **The snap keeps its own `known_hosts`.** A strict snap cannot read `~/.ssh` — the `home`
+  interface excludes hidden directories by design, and the read-only `ssh-keys` interface could
+  not record a newly trusted host even if it were connected. The snap therefore uses
+  `~/snap/uniterm/common/known_hosts`, so a host trusted in UniTerm is *not* trusted by `ssh`
+  and vice versa. Set `UNITERM_KNOWN_HOSTS` to point somewhere else. Outside the snap the
+  standard `~/.ssh/known_hosts` is used and does interoperate.
+* **The snap cannot see built-in serial ports.** `serial-port` covers USB adapters via snapd's
+  hotplug support; `/dev/ttyS0`-style ports are only offered by a gadget snap on Ubuntu Core.
+* **ssh-agent is not supported.** It needs a named-pipe transport on Windows and a separate
+  code path; a half-working option would be worse than none.
+* **A server that refuses a PTY yields a line-mode shell rather than an error.** russh does
+  not block for the PTY reply, so the refusal arrives too late to report.
+* **The interface can only use glyphs egui's bundled font has.** Tab titles, buttons and
+  warnings are limited to what the built-in proportional face covers, which is narrower than
+  it looks — U+25CF, U+25BE and U+26A0 are all absent, and using one renders a hollow box.
+  A test pins the set in use; embedding a font would lift the restriction.
 
 ### Where state is stored
 
@@ -112,15 +183,13 @@ The six features planned in [PLAN.md](PLAN.md) are all built. What is left from 
 `~/Library/Application Support/UniTerm/` on macOS). It is a readable RON file holding the dock
 layout, one entry per tab, and the window geometry.
 
+Inside the snap this is redirected to `~/snap/uniterm/current/.local/share/uniterm/`, which
+snapd copies forward on refresh, and the host key store sits alongside it in
+`~/snap/uniterm/common/`.
+
 If it cannot be read — corrupted, or written by a newer UniTerm — the app starts with a fresh
 layout, says so in the toolbar, and keeps the unreadable payload under a separate key rather
 than overwriting it. Deleting the file is always safe.
-* **ssh-agent is not supported.** It needs a named-pipe transport on Windows and a separate
-  code path; a half-working option would be worse than none.
-* **A server that refuses a PTY yields a line-mode shell rather than an error.** russh does
-  not block for the PTY reply, so the refusal arrives too late to report.
-* The bundled monospace font is egui's built-in one. Embedding Fira Code needs the TTF
-  added to `resources/`.
 
 ### A note on the SSH crypto backend
 
@@ -144,14 +213,30 @@ comment in [Cargo.toml](Cargo.toml).
 There is no Node toolchain, no web build step and no separate frontend — it is one Rust
 crate.
 
+On Windows that is the whole story: no CMake, no NASM, no C toolchain beyond the MSVC linker.
+On Linux, serial port enumeration links against libudev, so its headers are needed:
+
+```bash
+sudo apt install build-essential pkg-config libudev-dev
+```
+
+That is the whole list — verified by building on a clean Ubuntu. No Wayland or X11 `-dev`
+packages are needed, because winit and wgpu reach the display stack through `dlopen` rather
+than linking against it.
+
+`libudev-dev` is not optional. Without the `libudev` cargo feature — enabled for Linux in
+`Cargo.toml` — `serialport` compiles no Linux branch at all and `available_ports` returns
+"Not implemented for this OS", so the port list is silently empty.
+
 ### Build a release binary
 
 ```bash
 cargo build --release
 ```
 
-The executable lands in `target/release/UniTerm.exe`. It is self-contained: the window and
-executable icons are embedded at build time.
+The executable lands in `target/release/UniTerm` (`.exe` on Windows). It is self-contained:
+on Windows the window and taskbar icons are embedded at build time, and on Linux the desktop
+entry and icon are supplied by the snap.
 
 ### Build the installer
 
@@ -193,6 +278,27 @@ signing certificate; pass `-CertThumbprint` once you have one.
 pre-release suffix and only compares `major.minor.patch`, so the suffix is dropped for the
 package version and the script says so.
 
+### Build the snap
+
+On a Linux machine with [snapcraft](https://snapcraft.io/snapcraft) and LXD:
+
+```bash
+snapcraft pack
+sudo snap install --dangerous ./uniterm_*.snap
+```
+
+The toolchain is installed by the `rust-deps` part rather than the plugin's `rust-channel`,
+which would pull the `rustup` snap. That snap installs correctly but the plugin cannot see it:
+the toolchain check runs in a shell that inherits snapcraft's own PATH, and snapcraft is a
+classic snap whose PATH excludes `/snap/bin`. See the comment in `snapcraft.yaml`.
+
+Snap versions are free-form, so unlike the MSI the `-dev` suffix is kept as-is; the version is
+read out of `Cargo.toml` by `override-pull` rather than written twice.
+
+The build uses the `gnome` extension, which supplies mesa, fonts, themes and the XDG portal
+wiring from the shared GNOME platform snap. Building graphics drivers into the snap instead
+would work but would be far larger and would age badly.
+
 ### Tests and lints
 
 ```bash
@@ -226,9 +332,11 @@ RUST_LOG=uniterm=debug cargo run
 | [src/term/emu.rs](src/term/emu.rs) | Terminal emulator wrapper |
 | [src/term/render.rs](src/term/render.rs) | Grid and byte-view rendering |
 | [src/term/input.rs](src/term/input.rs) | Key and modifier to byte-stream mapping |
-| [src/term/palette.rs](src/term/palette.rs) | Colour resolution |
+| [src/term/palette.rs](src/term/palette.rs) | Light/dark palettes, ANSI colour resolution, contrast floor |
 | [src/term/text.rs](src/term/text.rs) | ASCII-view text preparation |
 | [src/ui.rs](src/ui.rs) | Per-tab controls |
 | [installer/uniterm.wxs](installer/uniterm.wxs) | MSI authoring: per-user install, upgrades, shortcut |
 | [installer/build.ps1](installer/build.ps1) | Builds the MSI, provisioning WiX on first use |
 | [installer/verify.ps1](installer/verify.ps1) | Installs, checks, upgrades and uninstalls it |
+| [snap/snapcraft.yaml](snap/snapcraft.yaml) | Snap packaging: confinement, interfaces, build |
+| [snap/gui/uniterm.desktop](snap/gui/uniterm.desktop) | Desktop entry used by the snap |

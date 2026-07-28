@@ -271,7 +271,7 @@ pub fn controls(
     if let Some(error) = session.last_error.clone() {
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
-            ui.colored_label(ui.visuals().error_fg_color, "⚠");
+            ui.colored_label(ui.visuals().error_fg_color, "!");
             ui.colored_label(ui.visuals().error_fg_color, error);
             if ui.small_button("Dismiss").clicked() {
                 session.last_error = None;
@@ -508,7 +508,7 @@ fn host_key_prompt(ui: &mut Ui, session: &mut Session, rt: &Handle) {
         .inner_margin(8.0)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, "⚠");
+                ui.colored_label(ui.visuals().warn_fg_color, "!");
                 ui.strong(format!("{host}:{port} is not in your known_hosts."));
             });
             ui.add_space(2.0);

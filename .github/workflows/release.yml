@@ -78,3 +78,47 @@ jobs:
           gh release upload "${{ github.ref_name }}" $msi --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+  snap:
+    name: Linux snap
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds in LXD using the snapcraft.yaml in snap/. The Rust toolchain comes from
+      # rustup inside the build (see `rust-channel`), not from the runner, so there is no
+      # toolchain step here.
+      - name: Build snap
+        id: build
+        uses: snapcore/action-build@v1
+
+      # A snap that builds but will not start is not worth publishing, and the failure mode
+      # for a confined GUI app is usually a missing library rather than a compile error.
+      # There is no display on the runner, so this checks the binary loads and links.
+      - name: Smoke-test the built snap
+        run: |
+          sudo snap install --dangerous "${{ steps.build.outputs.snap }}"
+          snap list uniterm
+          # Confinement and the interfaces the app needs are properties of the built snap,
+          # so they can be asserted without a display.
+          snap connections uniterm
+          for plug in serial-port hardware-observe home network; do
+            snap connections uniterm | grep -q "uniterm:$plug" \
+              || { echo "::error::the $plug plug is missing from the built snap"; exit 1; }
+          done
+          test "$(snap info --verbose uniterm | awk '/confinement:/ {print $2}')" = strict \
+            || { echo "::error::the snap is not strictly confined"; exit 1; }
+          sudo snap remove --purge uniterm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uniterm-snap
+          path: ${{ steps.build.outputs.snap }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release upload "${{ github.ref_name }}" "${{ steps.build.outputs.snap }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

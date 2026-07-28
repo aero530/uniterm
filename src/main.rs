@@ -22,6 +22,18 @@ use tracing_subscriber::EnvFilter;
 /// no longer wiring up resources.
 const ICON_PNG: &[u8] = include_bytes!("../resources/icons/128x128.png");
 
+/// Wayland has no window icon of its own: the compositor finds one by matching the surface's
+/// app id to a `.desktop` file of the same name. snapd installs ours as
+/// `<snap instance>_uniterm.desktop`, so inside a snap the id has to match that or the window
+/// shows a generic placeholder. `SNAP_INSTANCE_NAME` is set by snapd and accounts for parallel
+/// installs, where the instance is `uniterm_foo` rather than `uniterm`.
+fn app_id(snap_instance: Option<std::ffi::OsString>) -> String {
+    match snap_instance.as_deref().and_then(|s| s.to_str()) {
+        Some(instance) if !instance.is_empty() => format!("{instance}_uniterm"),
+        _ => "uniterm".to_owned(),
+    }
+}
+
 fn main() -> eframe::Result {
     // The Tauri build hard-coded `Level::TRACE`, which buried anything useful. Default to
     // warnings and let `RUST_LOG` turn detail back on.
@@ -48,6 +60,7 @@ fn main() -> eframe::Result {
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([720.0, 480.0])
         .with_clamp_size_to_monitor_size(true)
+        .with_app_id(app_id(std::env::var_os("SNAP_INSTANCE_NAME")))
         .with_title("UniTerm");
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON_PNG) {
         viewport = viewport.with_icon(icon);
@@ -72,4 +85,24 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_id_is_the_plain_name_outside_a_snap() {
+        assert_eq!(app_id(None), "uniterm");
+        assert_eq!(app_id(Some("".into())), "uniterm");
+    }
+
+    /// Must line up with the desktop file snapd generates, or the window has no icon on
+    /// Wayland. See `app_id`.
+    #[test]
+    fn app_id_matches_the_desktop_file_snapd_installs() {
+        assert_eq!(app_id(Some("uniterm".into())), "uniterm_uniterm");
+        // Parallel install: `snap install --name uniterm_dev uniterm`.
+        assert_eq!(app_id(Some("uniterm_dev".into())), "uniterm_dev_uniterm");
+    }
 }
