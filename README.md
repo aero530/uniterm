@@ -244,15 +244,21 @@ entry and icon are supplied by the snap.
 .\installer\build.ps1
 ```
 
-Produces `target/installer/UniTerm-<version>-x64.msi`. Then check it actually works:
+Produces `target/installer/UniTerm-<version>-x64.msi`. The wizard's licence page and both of its
+bitmaps are generated at build time — the licence from `LICENSE`, the 493x58 banner and 493x312
+panel from `resources/icon.png` — so none of them can drift from the source they came from, and
+no uncompressed BMPs are committed. Left unset, WiX substitutes its own bundled placeholder
+licence (Lorem ipsum) and artwork. Then check it actually works:
 
 ```powershell
 .\installer\verify.ps1
 ```
 
-`verify.ps1` installs the MSI, confirms the files, Start Menu shortcut and registration, launches
-the installed binary, reinstalls to prove upgrades replace rather than duplicate, then uninstalls
-and confirms nothing is left behind. It exits non-zero on the first failure, so it works as a
+`verify.ps1` checks the package metadata, that the licence page shows the real Apache-2.0 text
+rather than WiX's placeholder, and that both wizard bitmaps are ours rather than WiX's, installs
+the MSI, confirms the files, Start Menu shortcut and
+registration, launches the installed binary, reinstalls to prove upgrades replace rather than
+duplicate, then uninstalls and confirms nothing is left behind. It exits non-zero on the first failure, so it works as a
 release gate — [the release workflow](.github/workflows/release.yml) runs it before publishing.
 
 The WiX toolset is provisioned on first use into `target/installer-tools/`: a pinned copy of the
