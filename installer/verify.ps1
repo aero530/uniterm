@@ -32,7 +32,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $RepoDir = Split-Path -Parent $PSScriptRoot
-$InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\UniTerm'
+$ProgramsDir = Join-Path $env:LOCALAPPDATA 'Programs'
+$InstallDir = Join-Path $ProgramsDir 'UniTerm'
 $Shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\UniTerm.lnk'
 
 $script:Failures = 0
@@ -199,6 +200,23 @@ foreach ($art in @(@{ Name = 'WixUI_Bmp_Banner'; Size = 85894;  Dims = '493x58' 
         "expected $($art.Size) bytes for a 24-bit $($art.Dims) BMP, found $actual - WiX's own bitmap, or a different size or colour depth"
 }
 
+<#
+    Stand in for another application inside the shared Programs folder.
+
+    The uninstall must leave that folder alone, but "left alone" is only observable when something
+    else is in it: RemoveFolder deletes a directory only when it is empty, so on a machine where
+    nothing else lives there — a CI runner, say — this install creates Programs and its uninstall
+    correctly removes it again, and an unqualified Test-Path would report a failure with nothing
+    wrong. A neighbour planted before the install makes the claim mean what it says everywhere,
+    and turns it into a real test of the RemoveFolder behaviour the authoring relies on.
+#>
+$Neighbour = Join-Path $ProgramsDir 'uniterm-verify-neighbour'
+$ProgramsPreexisted = Test-Path $ProgramsDir
+[void](New-Item -ItemType Directory -Path $Neighbour -Force)
+$NeighbourFile = Join-Path $Neighbour 'keep.txt'
+Set-Content -Path $NeighbourFile -Encoding utf8 `
+    -Value 'Placed by installer/verify.ps1 to check the uninstall leaves its neighbours alone. Safe to delete.'
+
 Write-Step 'Silent install as a normal user'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $elevated = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -252,8 +270,16 @@ if ($KeepInstalled) {
     Test-Claim 'Start Menu shortcut removed' (-not (Test-Path $Shortcut))
     Test-Claim 'registry marker removed' (-not (Test-Path 'HKCU:\Software\UniTerm'))
     Test-Claim 'no longer reported as installed' (@(Get-InstalledProducts $UpgradeCode).Count -eq 0)
-    # The parent is shared with other applications, so it must survive.
-    Test-Claim 'shared Programs folder left alone' (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs'))
+    # The parent is shared with other applications, so it and their files must survive.
+    Test-Claim 'shared Programs folder left alone' (Test-Path $NeighbourFile) `
+        "the neighbouring folder planted at $Neighbour did not survive the uninstall"
+}
+
+# Tidy the stand-in away, and Programs itself if this script is what created it and the uninstall
+# has left it empty — which is the state a machine with no other per-user applications started in.
+Remove-Item $Neighbour -Recurse -Force -ErrorAction SilentlyContinue
+if (-not $ProgramsPreexisted -and (Test-Path $ProgramsDir) -and -not (Get-ChildItem $ProgramsDir -Force)) {
+    Remove-Item $ProgramsDir -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
